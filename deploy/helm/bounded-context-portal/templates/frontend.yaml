@@ -1,0 +1,141 @@
+{{- if .Values.frontend.enabled }}
+{{- $f := .Values.frontend }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bcp.fullname" . }}-frontend
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "frontend") | nindent 4 }}
+spec:
+  {{- if not $f.autoscaling.enabled }}
+  replicas: {{ $f.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bcp.componentLabels" (dict "ctx" $ "component" "frontend") | nindent 8 }}
+      {{- with $f.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "bcp.fullname" . }}-frontend
+      automountServiceAccountToken: false
+      {{- with (include "bcp.imagePullSecrets" . | trim) }}{{ . | nindent 6 }}{{- end }}
+      securityContext:
+        {{- include "bcp.podSecurityContext" . | nindent 8 }}
+      {{- with (include "bcp.topologySpread" (dict "ctx" $ "component" "frontend") | trim) }}{{ . | nindent 6 }}{{- end }}
+      {{- with $f.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $f.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $f.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend
+          image: {{ include "bcp.image" (dict "ctx" $ "image" $f.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: API_UPSTREAM
+              value: {{ default (printf "http://%s-api:8080" (include "bcp.fullname" .)) $f.apiUpstream | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml $f.resources | nindent 12 }}
+          securityContext:
+            {{- include "bcp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with $f.writableConfDir }}
+            - name: nginx-conf
+              mountPath: {{ . }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- if $f.writableConfDir }}
+        - name: nginx-conf
+          emptyDir:
+            sizeLimit: 1Mi
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bcp.fullname" . }}-frontend
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "frontend") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "frontend") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+{{- if $f.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "bcp.fullname" . }}-frontend
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "frontend") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "bcp.fullname" . }}-frontend
+  minReplicas: {{ $f.autoscaling.minReplicas }}
+  maxReplicas: {{ $f.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $f.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- if $f.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "bcp.fullname" . }}-frontend
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "frontend") | nindent 4 }}
+spec:
+  minAvailable: {{ $f.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "frontend") | nindent 6 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,61 @@
+# Staging — production-like topology (KEDA loop mode, HA api/frontend). Image tags are set by the release
+# pipeline (--set api.image.tag=<sha> ...).
+
+global:
+  imageRegistry: bcpacr.azurecr.io          # <shared ACR>
+
+config:
+  publicUrl: https://bcp-staging.example.com
+  github:
+    appId: "000001"                         # <staging GitHub App id>
+    appSlug: bounded-context-portal-staging
+    clientId: Iv23liSTAGINGEXAMPLE
+  rustLog: "info,bcp=debug,sqlx=warn"
+  modelsShowUnverified: false
+  otel:
+    endpoint: ""                            # e.g. http://otel-collector.monitoring:4317
+
+secrets:
+  mode: csi
+  keyVault:
+    name: kv-bcp-staging
+    tenantId: 00000000-0000-0000-0000-000000000000
+
+serviceAccounts:
+  api:
+    clientId: 33333333-3333-3333-3333-333333333333      # id-bcp-api-staging
+  worker:
+    clientId: 44444444-4444-4444-4444-444444444444      # id-bcp-worker-staging
+
+api:
+  autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 4, targetCPUUtilizationPercentage: 70 }
+
+worker:
+  mode: loop
+  concurrency: 1
+  scaledObject:
+    minReplicaCount: 1
+    maxReplicaCount: 4
+
+frontend:
+  autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 3, targetCPUUtilizationPercentage: 75 }
+
+keda:
+  enabled: true
+
+metrics:
+  podMonitor:
+    enabled: true
+
+ingress:
+  host: bcp-staging.example.com
+  tls:
+    enabled: true
+    keyVaultCertUri: https://kv-bcp-staging.vault.azure.net/certificates/bcp-staging-tls
+
+networkPolicy:
+  enabled: true
+  postgres:
+    cidrs: ["10.30.16.0/24"]
+  cilium:
+    enabled: false

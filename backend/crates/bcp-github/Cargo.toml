@@ -1,0 +1,32 @@
+[package]
+name = "bcp-github"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bcp-core.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+bytes = "1"
+chrono.workspace = true
+futures.workspace = true
+jsonwebtoken.workspace = true
+metrics.workspace = true
+percent-encoding.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio.workspace = true
+tempfile.workspace = true

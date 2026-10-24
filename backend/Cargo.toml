@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bcp-core",
+    "crates/bcp-github",
+    "crates/bcp-agent",
+    "crates/bcp-store",
+    "crates/bcp-services",
+    "crates/bcp-api",
+    "crates/bcp-worker",
+    "tools/mock-github",
+    "tools/fake-copilot",
+    "tools/integration-tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+bcp-core = { path = "crates/bcp-core" }
+bcp-github = { path = "crates/bcp-github" }
+bcp-agent = { path = "crates/bcp-agent" }
+bcp-store = { path = "crates/bcp-store" }
+bcp-services = { path = "crates/bcp-services" }
+mock-github = { path = "tools/mock-github" }
+
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+flate2 = "1"
+futures = "0.3"
+globset = "0.4"
+hex = "0.4"
+jsonwebtoken = "9"
+libc = "0.2"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"] }
+percent-encoding = "2"
+rand = "0.8"
+regex = "1"
+# Mozilla roots plus the system store (corporate CAs for GitHub Enterprise Server / egress proxies).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots", "stream", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+serde_urlencoded = "0.7"
+sha2 = "0.10"
+similar = "2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
+tar = "0.4"
+tempfile = "3"
+thiserror = "2"
+time = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "request-id", "limit", "timeout", "set-header", "propagate-header"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.28"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"
+wiremock = "0.6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

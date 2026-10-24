@@ -1,0 +1,24 @@
+Bounded Context Portal {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+{{- if .Values.ingress.enabled }}
+URL: https://{{ .Values.ingress.host }}
+{{- end }}
+
+Worker mode: {{ .Values.worker.mode }}{{ if .Values.keda.enabled }} (KEDA {{ if eq .Values.worker.mode "loop" }}ScaledObject{{ else }}ScaledJob{{ end }}){{ end }}
+Secrets: {{ .Values.secrets.mode }}{{ if eq .Values.secrets.mode "csi" }} (Key Vault "{{ .Values.secrets.keyVault.name }}"){{ end }}
+
+Check:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "bcp.fullname" . }}-api
+{{- if eq .Values.worker.mode "loop" }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "bcp.fullname" . }}-worker
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} get jobs -l app.kubernetes.io/component=worker
+{{- end }}
+{{- if and .Values.keda.enabled (eq .Values.secrets.mode "csi") (not .Values.keda.connectionSecret.name) }}
+
+KEDA reads the database connection from Secret "{{ include "bcp.syncedDbSecretName" . }}", which the CSI driver
+creates once an api pod has mounted its SecretProviderClass.
+{{- end }}
+
+Rollback: helm -n {{ .Release.Namespace }} rollback {{ .Release.Name }} <REVISION> --wait   (see docs/operations.md)

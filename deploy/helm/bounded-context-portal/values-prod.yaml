@@ -1,0 +1,78 @@
+# Production. Pod-per-agent-run isolation (KEDA ScaledJob), HA api/frontend, hostname egress filtering.
+# The release pipeline sets image tags to the git SHA; prefer pinning digests (api.image.digest=sha256:...).
+
+global:
+  imageRegistry: bcpacr.azurecr.io          # <shared ACR>
+
+config:
+  publicUrl: https://bcp.example.com
+  github:
+    appId: "000002"                         # <production GitHub App id>
+    appSlug: bounded-context-portal
+    clientId: Iv23liPRODEXAMPLE
+  rustLog: "info,sqlx=warn"
+  modelsShowUnverified: false
+  otel:
+    endpoint: ""                            # e.g. http://otel-collector.monitoring:4317
+
+secrets:
+  mode: csi
+  keyVault:
+    name: kv-bcp-prod
+    tenantId: 00000000-0000-0000-0000-000000000000
+
+serviceAccounts:
+  api:
+    clientId: 55555555-5555-5555-5555-555555555555      # id-bcp-api-prod
+  worker:
+    clientId: 66666666-6666-6666-6666-666666666666      # id-bcp-worker-prod
+
+api:
+  autoscaling: { enabled: true, minReplicas: 3, maxReplicas: 8, targetCPUUtilizationPercentage: 65 }
+  pdb: { enabled: true, minAvailable: 2 }
+  resources:
+    requests: { cpu: 200m, memory: 192Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+worker:
+  mode: once
+  scaledJob:
+    maxReplicaCount: 20
+    activeDeadlineSeconds: 3900
+  env:
+    BCP_MAX_JOB_TIMEOUT_SECS: "3600"
+    BCP_MAX_REPO_BYTES: "524288000"
+    BCP_MAX_REPO_FILES: "100000"
+    BCP_TASK_LEASE_SECS: "60"
+    BCP_GENERATE_MAX_ATTEMPTS: "2"
+    BCP_PUBLISH_MAX_ATTEMPTS: "5"
+    BCP_SHUTDOWN_GRACE_SECS: "60"
+    BCP_IDLE_EXIT_SECS: "60"
+  resources:
+    requests: { cpu: "1", memory: 2Gi, ephemeral-storage: 2Gi }
+    limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 6Gi }
+
+frontend:
+  autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 6, targetCPUUtilizationPercentage: 70 }
+
+keda:
+  enabled: true
+
+metrics:
+  podMonitor:
+    enabled: true
+
+ingress:
+  host: bcp.example.com
+  tls:
+    enabled: true
+    keyVaultCertUri: https://kv-bcp-prod.vault.azure.net/certificates/bcp-tls
+
+networkPolicy:
+  enabled: true
+  postgres:
+    cidrs: ["10.40.16.0/24"]
+  # Requires Azure CNI powered by Cilium + Advanced Container Networking Services (docs/azure-setup.md §4).
+  # Verify copilotFqdnPatterns against GitHub's Copilot allowlist reference before enabling.
+  cilium:
+    enabled: true

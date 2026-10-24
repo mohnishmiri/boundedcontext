@@ -1,0 +1,97 @@
+{{- if and .Values.migrations.enabled .Values.api.enabled }}
+{{- /*
+Hooks run before regular release resources exist, so the migration Job brings its own ServiceAccount and
+SecretProviderClass as lower-weight hook resources. The migrate identity (default: the api identity) needs a
+federated credential for serviceAccounts.migrate.name.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccounts.migrate.name }}
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
+    {{- with (include "bcp.migrateClientId" .) }}
+    azure.workload.identity/client-id: {{ . | quote }}
+    {{- end }}
+automountServiceAccountToken: false
+{{- if eq .Values.secrets.mode "csi" }}
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: {{ include "bcp.fullname" . }}-migrate
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  provider: azure
+  parameters:
+    usePodIdentity: "false"
+    useVMManagedIdentity: "false"
+    clientID: {{ required "serviceAccounts.migrate.clientId or serviceAccounts.api.clientId is required" (include "bcp.migrateClientId" .) | quote }}
+    keyvaultName: {{ .Values.secrets.keyVault.name | quote }}
+    tenantId: {{ .Values.secrets.keyVault.tenantId | quote }}
+    objects: |
+      {{- include "bcp.spcObjects" (dict "names" (list .Values.secrets.keyVault.objects.databaseUrl)) | nindent 6 }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "bcp.fullname" . }}-migrate
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    # Keep failed Jobs for inspection; they are replaced on the next attempt.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "bcp.componentLabels" (dict "ctx" $ "component" "migrate") | nindent 8 }}
+        {{- with (include "bcp.podIdentityLabels" . | trim) }}{{ . | nindent 8 }}{{- end }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Values.serviceAccounts.migrate.name }}
+      automountServiceAccountToken: false
+      {{- with (include "bcp.imagePullSecrets" . | trim) }}{{ . | nindent 6 }}{{- end }}
+      securityContext:
+        {{- include "bcp.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "bcp.image" (dict "ctx" $ "image" .Values.api.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["migrate"]
+          env:
+            - name: BCP_LOG_FORMAT
+              value: {{ .Values.config.logFormat | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.config.rustLog | quote }}
+            {{- include "bcp.secretFileEnv" (dict "ctx" $ "all" false) | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          securityContext:
+            {{- include "bcp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: secrets
+              mountPath: {{ .Values.secrets.mountPath }}
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- include "bcp.secretVolume" (dict "ctx" $ "component" "migrate") | nindent 8 }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}

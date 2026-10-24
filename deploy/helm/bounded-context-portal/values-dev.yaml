@@ -1,0 +1,85 @@
+# Development (shared dev AKS cluster). Small, single replicas, verbose logs, no KEDA dependency.
+# For a local kind/minikube cluster without Key Vault, switch to:
+#   secrets: { mode: existingSecret, existingSecret: bcp-dev-secrets }
+#   ingress: { className: nginx, tls: { enabled: false } }
+#   networkPolicy: { enabled: false }
+
+global:
+  imageRegistry: bcpdevacr.azurecr.io      # <dev ACR>
+
+config:
+  publicUrl: https://bcp-dev.example.com
+  github:
+    appId: "000000"                        # <dev GitHub App id>
+    appSlug: bounded-context-portal-dev
+    clientId: Iv23liDEVEXAMPLE
+  rustLog: "debug,sqlx=warn,hyper=info,reqwest=info"
+  modelsShowUnverified: true
+
+secrets:
+  mode: csi
+  keyVault:
+    name: kv-bcp-dev
+    tenantId: 00000000-0000-0000-0000-000000000000
+
+serviceAccounts:
+  api:
+    clientId: 11111111-1111-1111-1111-111111111111      # id-bcp-api-dev
+  worker:
+    clientId: 22222222-2222-2222-2222-222222222222      # id-bcp-worker-dev
+
+api:
+  image: { tag: dev }
+  replicas: 1
+  autoscaling: { enabled: false }
+  pdb: { enabled: false }
+  env:
+    BCP_SESSION_TTL_HOURS: "12"
+    BCP_COOKIE_SECURE: "true"
+    BCP_RATE_LIMIT_PER_MINUTE: "600"
+    BCP_JOB_CREATE_LIMIT_PER_HOUR: "100"
+    BCP_RUN_MIGRATIONS: "false"
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 500m, memory: 384Mi }
+
+worker:
+  mode: loop
+  image: { tag: dev }
+  replicas: 1
+  env:
+    BCP_MAX_JOB_TIMEOUT_SECS: "1800"
+    BCP_MAX_REPO_BYTES: "262144000"
+    BCP_MAX_REPO_FILES: "50000"
+    BCP_TASK_LEASE_SECS: "60"
+    BCP_GENERATE_MAX_ATTEMPTS: "1"
+    BCP_PUBLISH_MAX_ATTEMPTS: "3"
+    BCP_SHUTDOWN_GRACE_SECS: "30"
+    BCP_IDLE_EXIT_SECS: "30"
+  terminationGracePeriodSeconds: 90
+  resources:
+    requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
+    limits: { cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi }
+
+frontend:
+  image: { tag: dev }
+  replicas: 1
+  autoscaling: { enabled: false }
+  pdb: { enabled: false }
+
+keda:
+  enabled: false
+
+topologySpread:
+  enabled: false
+
+ingress:
+  host: bcp-dev.example.com
+  tls:
+    enabled: true
+    keyVaultCertUri: https://kv-bcp-dev.vault.azure.net/certificates/bcp-dev-tls
+
+networkPolicy:
+  enabled: true
+  postgres:
+    cidrs: ["10.20.16.0/24"]

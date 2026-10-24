@@ -1,0 +1,47 @@
+name: Release images
+
+# Pushes api / worker / frontend images to Azure Container Registry when a version tag is pushed.
+# Authentication is OpenID Connect (no stored secrets): create a federated credential on the deploy identity for
+# `repo:<org>/<repo>:ref:refs/tags/*` and set the repository variables below (docs/azure-setup.md §3).
+#   vars.AZURE_CLIENT_ID, vars.AZURE_TENANT_ID, vars.AZURE_SUBSCRIPTION_ID, vars.ACR_NAME
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    strategy:
+      matrix:
+        include:
+          - { name: bcp-api, file: backend/Dockerfile, target: api, context: . }
+          - { name: bcp-worker, file: backend/Dockerfile, target: worker, context: . }
+          - { name: bcp-frontend, file: frontend/Dockerfile, target: "", context: frontend }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - run: az acr login --name "${{ vars.ACR_NAME }}"
+      - uses: docker/setup-buildx-action@v3
+      - id: meta
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ vars.ACR_NAME }}.azurecr.io/${{ matrix.name }}:${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.name }}

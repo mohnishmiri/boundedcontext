@@ -1,0 +1,10 @@
+# Build context is the repository root (backend/Dockerfile needs agent-bundle/ and config/).
+.git
+**/node_modules
+**/dist
+**/coverage
+backend/target
+**/*.log
+.env
+.env.*
+!.env.example

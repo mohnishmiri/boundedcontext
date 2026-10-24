@@ -1,0 +1,42 @@
+[package]
+name = "bcp-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bcp-agent-run"
+path = "src/bin/bcp-agent-run.rs"
+
+[dependencies]
+bcp-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+flate2.workspace = true
+globset.workspace = true
+hex.workspace = true
+futures.workspace = true
+libc.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+similar.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+libc.workspace = true
+tokio.workspace = true
+async-trait.workspace = true

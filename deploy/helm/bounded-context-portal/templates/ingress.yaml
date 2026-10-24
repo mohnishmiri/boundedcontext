@@ -1,0 +1,53 @@
+{{- if .Values.ingress.enabled }}
+{{- $i := .Values.ingress }}
+{{- $name := include "bcp.fullname" . }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "bcp.labels" . | nindent 4 }}
+  annotations:
+    # NGINX (AKS application routing add-on / ingress-nginx) settings for long-lived SSE streams.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: {{ $i.sseTimeoutSeconds | quote }}
+    nginx.ingress.kubernetes.io/proxy-send-timeout: {{ $i.sseTimeoutSeconds | quote }}
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ $i.bodySize | quote }}
+    {{- if $i.tls.enabled }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    {{- end }}
+    {{- with $i.tls.keyVaultCertUri }}
+    kubernetes.azure.com/tls-cert-keyvault-uri: {{ . | quote }}
+    {{- end }}
+    {{- with $i.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $i.className }}
+  {{- if $i.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $i.host | quote }}
+      # The app routing add-on syncs the Key Vault certificate into secret keyvault-<ingress name>.
+      secretName: {{ if $i.tls.keyVaultCertUri }}{{ printf "keyvault-%s" $name }}{{ else }}{{ required "ingress.tls.secretName or ingress.tls.keyVaultCertUri is required when TLS is enabled" $i.tls.secretName }}{{ end }}
+  {{- end }}
+  rules:
+    - host: {{ $i.host | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}-api
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}-frontend
+                port:
+                  name: http
+{{- end }}

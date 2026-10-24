@@ -1,0 +1,66 @@
+# Alert rules for the Bounded Context Portal. Apply to Azure Monitor managed Prometheus (convert with
+# `az alerts-management prometheus-rule-group create` or the az-prom-rules-converter) or to prometheus-operator
+# as a PrometheusRule. Thresholds are starting points; tune them to your traffic.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bounded-context-portal
+  labels:
+    app.kubernetes.io/part-of: bounded-context-portal
+spec:
+  groups:
+    - name: bcp-api
+      rules:
+        - alert: BcpApiHighErrorRate
+          expr: |
+            sum(rate(bcp_http_requests_total{status=~"5.."}[10m]))
+              / clamp_min(sum(rate(bcp_http_requests_total[10m])), 1e-9) > 0.05
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: More than 5% of API requests fail with 5xx.
+            runbook: docs/operations.md#5-troubleshooting-by-error-code
+        - alert: BcpGitHubRateLimited
+          expr: sum(rate(bcp_github_requests_total{status="429"}[15m])) > 0.1
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: GitHub is rate limiting the portal.
+        - alert: BcpSignInFailures
+          expr: sum(rate(bcp_auth_failures_total{code=~"exchange_failed|internal"}[15m])) > 0.05
+          for: 15m
+          labels: { severity: critical }
+          annotations:
+            summary: Sign-ins are failing (check the GitHub App client secret and Key Vault mounts).
+
+    - name: bcp-worker
+      rules:
+        - alert: BcpQueueBacklog
+          expr: max(bcp_tasks_pending) > 20
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: More than 20 tasks have been waiting for 15 minutes (workers not scaling or not ready).
+        - alert: BcpGenerationFailureRate
+          expr: |
+            sum(rate(bcp_generations_total{outcome="failed"}[1h]))
+              / clamp_min(sum(rate(bcp_generations_total{outcome=~"failed|succeeded"}[1h])), 1e-9) > 0.3
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: Over 30% of generations fail. Break down by the `code` label.
+        - alert: BcpCopilotUnauthorized
+          expr: sum(increase(bcp_generations_total{code="copilot_unauthorized"}[1h])) > 5
+          labels: { severity: warning }
+          annotations:
+            summary: Copilot rejects user tokens repeatedly (seat, policy or GitHub App permission problem).
+        - alert: BcpWorkersReaped
+          expr: sum(increase(bcp_tasks_reaped_total[30m])) > 3
+          labels: { severity: warning }
+          annotations:
+            summary: Workers are dying mid-task (OOM kills? check pod events).
+        - alert: BcpPublishFailures
+          expr: sum(increase(bcp_publish_total{outcome="failed", code!~"base_branch_changed|branch_conflict|repository_access_denied"}[1h])) > 3
+          labels: { severity: warning }
+          annotations:
+            summary: Pull request creation fails for reasons other than user-actionable conflicts.

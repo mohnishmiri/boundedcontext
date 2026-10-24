@@ -1,0 +1,341 @@
+# Default values for bounded-context-portal.
+# Environment overlays: values-dev.yaml, values-staging.yaml, values-prod.yaml.
+# Never put secrets in values files — secrets come from Azure Key Vault (secrets.mode=csi).
+
+# Resource name prefix. Defaults to the release name (e.g. release "bcp" -> bcp-api, bcp-worker, bcp-frontend).
+fullnameOverride: ""
+nameOverride: ""
+
+global:
+  # Registry prefix for all images, e.g. myacr.azurecr.io. AKS pulls via the kubelet identity (--attach-acr).
+  imageRegistry: ""
+  imagePullSecrets: []
+
+image:
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------------------------------------
+# Non-secret application configuration (rendered into ConfigMaps; names follow .env.example).
+# ---------------------------------------------------------------------------------------------------------
+config:
+  # Browser-facing origin. Must match the GitHub App callback URL host and the ingress host.
+  publicUrl: "https://bcp.example.com"
+  github:
+    apiUrl: "https://api.github.com"
+    webUrl: "https://github.com"
+    # Server-side OAuth token exchange base; empty = webUrl.
+    oauthUrl: ""
+    appId: ""
+    appSlug: ""
+    clientId: ""
+  logFormat: json
+  rustLog: "info,bcp=info,sqlx=warn"
+  modelsShowUnverified: false
+  # In-image locations (override only if you build custom images).
+  agentBundleDir: /opt/agent-bundle
+  modelsFile: /etc/bcp/models.yaml
+  otel:
+    # OTLP gRPC endpoint, e.g. http://otel-collector.monitoring:4317. Empty disables trace export.
+    endpoint: ""
+  # Extra non-secret env vars added to every component's ConfigMap.
+  extraEnv: {}
+
+# Override the model catalog baked into the api and worker images (config/models.yaml). When non-empty, the
+# chart creates a ConfigMap and mounts it at config.modelsFile in BOTH api and worker pods.
+models:
+  content: ""
+
+# Override the agent bundle baked into the api and worker images with an existing ConfigMap, mounted at
+# config.agentBundleDir in BOTH api and worker pods (the api reads it for GET /api/agent, input validation
+# and the model lock). Use `items` to map flat ConfigMap keys onto the bundle layout. Prefer rebuilding the
+# images for multi-file bundles. Changing `checksum` (any string, e.g. the bundle git SHA) rolls both.
+agentBundle:
+  configMap: ""
+  items: []   # e.g. [{key: bundle.yaml, path: bundle.yaml}, {key: agent, path: agents/BoundedContext.agent.md}]
+  checksum: ""
+
+# ---------------------------------------------------------------------------------------------------------
+# Secrets. Files are mounted at secrets.mountPath and consumed through *_FILE env vars:
+#   database-url, github-client-secret, github-app-private-key, token-encryption-key
+# ---------------------------------------------------------------------------------------------------------
+secrets:
+  # csi            -> Azure Key Vault via Secrets Store CSI driver + Workload Identity (recommended)
+  # existingSecret -> a Kubernetes Secret you manage (dev clusters / kind); same key names as above
+  mode: csi
+  mountPath: /mnt/secrets
+  existingSecret: ""
+  keyVault:
+    name: ""
+    tenantId: ""
+    # Key Vault secret names. Each is mounted as a file with the same name.
+    objects:
+      databaseUrl: database-url
+      githubClientSecret: github-client-secret
+      githubAppPrivateKey: github-app-private-key
+      tokenEncryptionKey: token-encryption-key
+    # Rotation poll interval is configured on the AKS add-on (--rotation-poll-interval); pods read files at
+    # start-up, so rotate by restarting (see docs/operations.md).
+  # Kubernetes Secret synced from Key Vault (by the api pod's CSI mount) that holds database-url for KEDA's
+  # TriggerAuthentication. Ignored when keda.connectionSecret.name is set.
+  syncedDbSecretName: ""
+
+# ---------------------------------------------------------------------------------------------------------
+# Identities (Azure Workload Identity). One user-assigned managed identity per component, each with a
+# federated credential for system:serviceaccount:<namespace>:<serviceAccount name>.
+# ---------------------------------------------------------------------------------------------------------
+workloadIdentity:
+  # Adds azure.workload.identity/use=true to pods (needed only by in-pod Azure SDKs; harmless otherwise).
+  podLabel: true
+
+serviceAccounts:
+  api:
+    name: bcp-api
+    clientId: ""
+  worker:
+    name: bcp-worker
+    clientId: ""
+  # Used by the pre-install/pre-upgrade migration hook. clientId defaults to the api identity, which then
+  # needs a federated credential for this service account name too.
+  migrate:
+    name: bcp-migrate
+    clientId: ""
+
+# Shared pod / container hardening.
+podSecurity:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+# Spread replicas across zones and nodes (best effort).
+topologySpread:
+  enabled: true
+  zoneSkew: 1
+  hostSkew: 1
+
+# Prometheus scraping. Azure Monitor managed Prometheus can scrape via pod annotations (enable
+# podannotationnamespaceregex in ama-metrics-settings-configmap) or a PodMonitor.
+metrics:
+  podAnnotations: true
+  podMonitor:
+    enabled: false
+    # azmonitoring.coreos.com/v1 for Azure managed Prometheus, monitoring.coreos.com/v1 for prometheus-operator
+    apiVersion: azmonitoring.coreos.com/v1
+    interval: 30s
+
+# ---------------------------------------------------------------------------------------------------------
+# API (Rust/Axum). Ports: 8080 http (/healthz, /readyz, /api), 9090 metrics.
+# ---------------------------------------------------------------------------------------------------------
+api:
+  enabled: true
+  image:
+    repository: bcp-api
+    tag: ""        # defaults to .Chart.AppVersion
+    digest: ""     # sha256:... — takes precedence over tag when set
+  replicas: 2
+  env:
+    BCP_SESSION_TTL_HOURS: "12"
+    BCP_COOKIE_SECURE: "true"
+    BCP_RATE_LIMIT_PER_MINUTE: "120"
+    BCP_JOB_CREATE_LIMIT_PER_HOUR: "20"
+    # Migrations run as a Helm hook (migrations.enabled). Set "true" only when migrations.enabled=false.
+    BCP_RUN_MIGRATIONS: "false"
+    # Settled jobs (generated files, logs) older than this are deleted hourly; audit events are kept. 0 = keep.
+    BCP_JOB_RETENTION_DAYS: "90"
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 1
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------------------------------------
+# Worker (Rust + GitHub Copilot CLI). Ports: 8081 (/healthz, /readyz), 9091 metrics.
+# ---------------------------------------------------------------------------------------------------------
+worker:
+  enabled: true
+  # loop -> long-running Deployment (`bcp-worker run`), scaled by KEDA ScaledObject (or HPA without KEDA).
+  #         Lower latency; scale-in may interrupt a run, which is requeued after graceful shutdown.
+  # once -> KEDA ScaledJob: one Kubernetes Job per pending task (`bcp-worker once`). Strongest isolation
+  #         (fresh pod per agent run), never interrupted by scale-in, ~10-30 s start-up latency. Requires KEDA.
+  mode: loop
+  image:
+    repository: bcp-worker
+    tag: ""
+    digest: ""
+  # Replicas when neither KEDA nor HPA manages the Deployment (loop mode).
+  replicas: 1
+  # Tasks processed concurrently per pod (BCP_WORKER_CONCURRENCY). Also KEDA's target per replica.
+  concurrency: 1
+  env:
+    BCP_MAX_JOB_TIMEOUT_SECS: "3600"
+    BCP_MAX_REPO_BYTES: "524288000"
+    BCP_MAX_REPO_FILES: "100000"
+    BCP_TASK_LEASE_SECS: "60"
+    BCP_GENERATE_MAX_ATTEMPTS: "2"
+    BCP_PUBLISH_MAX_ATTEMPTS: "5"
+    BCP_SHUTDOWN_GRACE_SECS: "60"
+    BCP_IDLE_EXIT_SECS: "30"
+    BCP_MAX_LOG_LINES: "5000"
+  # Must exceed BCP_SHUTDOWN_GRACE_SECS plus time to requeue (>= 90).
+  terminationGracePeriodSeconds: 120
+  workDir:
+    path: /work
+    sizeLimit: 4Gi
+  tmpSizeLimit: 1Gi
+  homeSizeLimit: 512Mi
+  resources:
+    requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1Gi }
+    limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 6Gi }
+  # KEDA settings (keda.enabled=true)
+  scaledObject:
+    minReplicaCount: 1
+    maxReplicaCount: 10
+    pollingInterval: 15
+    cooldownPeriod: 300
+    # Slow scale-down so busy pods are not picked for termination too eagerly.
+    scaleDownStabilizationSeconds: 600
+  scaledJob:
+    maxReplicaCount: 20
+    pollingInterval: 10
+    successfulJobsHistoryLimit: 5
+    failedJobsHistoryLimit: 10
+    # Hard stop for one Job pod: BCP_MAX_JOB_TIMEOUT_SECS + grace.
+    activeDeadlineSeconds: 3900
+    ttlSecondsAfterFinished: 3600
+  # HPA fallback when keda.enabled=false (loop mode only).
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: false
+    maxUnavailable: 1
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------------------------------------
+# Frontend (nginx-unprivileged serving the SPA). Port 8080, /healthz.
+# ---------------------------------------------------------------------------------------------------------
+frontend:
+  enabled: true
+  image:
+    repository: bcp-frontend
+    tag: ""
+    digest: ""
+  replicas: 2
+  # Where nginx proxies /api (local compose parity). Empty = http://<fullname>-api:8080.
+  apiUpstream: ""
+  # nginx renders /etc/nginx/templates/*.template into this directory at start-up, so it must be writable
+  # when the root filesystem is read-only.
+  writableConfDir: /etc/nginx/conf.d
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 75
+  pdb:
+    enabled: true
+    minAvailable: 1
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------------------------------------
+# KEDA (AKS add-on: az aks update --enable-keda)
+# ---------------------------------------------------------------------------------------------------------
+keda:
+  enabled: true
+  # Secret holding the PostgreSQL connection string for the postgresql scaler. Empty = the secret synced from
+  # Key Vault by the api pod (secrets.syncedDbSecretName or <fullname>-db-connection).
+  connectionSecret:
+    name: ""
+    key: database-url
+
+# ---------------------------------------------------------------------------------------------------------
+# Database migrations: `bcp-api migrate` as a pre-install/pre-upgrade hook. Migrations are forward-only.
+# ---------------------------------------------------------------------------------------------------------
+migrations:
+  enabled: true
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+# ---------------------------------------------------------------------------------------------------------
+# Ingress (AKS application routing add-on = managed NGINX).
+# ---------------------------------------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: webapprouting.kubernetes.azure.com
+  host: bcp.example.com
+  annotations: {}
+  # SSE streams (/api/bounded-context/jobs/{id}/events) stay open for the whole run.
+  sseTimeoutSeconds: 3600
+  bodySize: 1m
+  tls:
+    enabled: true
+    # App routing add-on: certificate in Key Vault, synced to secret keyvault-<ingress name>.
+    keyVaultCertUri: ""
+    # Otherwise an existing TLS secret (e.g. issued by cert-manager).
+    secretName: ""
+
+# ---------------------------------------------------------------------------------------------------------
+# NetworkPolicies (Azure NPM, Calico or Cilium). Default-deny plus explicit allows.
+# ---------------------------------------------------------------------------------------------------------
+networkPolicy:
+  enabled: true
+  ingressController:
+    namespaceSelector:
+      kubernetes.io/metadata.name: app-routing-system
+  monitoring:
+    namespaceSelector:
+      kubernetes.io/metadata.name: kube-system
+  dns:
+    namespaceSelector:
+      kubernetes.io/metadata.name: kube-system
+  postgres:
+    # Delegated subnet of PostgreSQL Flexible Server (private access).
+    cidrs: ["10.20.16.0/24"]
+    port: 5432
+  # Plain NetworkPolicy cannot filter by hostname: allow 443 to public addresses only. Disabled automatically
+  # when cilium.enabled=true (FQDN rules below replace it).
+  https:
+    cidr: 0.0.0.0/0
+    except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10"]
+  otlp:
+    enabled: false
+    namespaceSelector:
+      kubernetes.io/metadata.name: monitoring
+    port: 4317
+  # CiliumNetworkPolicy with toFQDNs (Azure CNI powered by Cilium + Advanced Container Networking Services).
+  cilium:
+    enabled: false
+    githubFqdns:
+      - api.github.com
+      - github.com
+      - codeload.github.com
+    # GitHub Copilot service hosts for the worker (Copilot CLI). Source: GitHub "Copilot allowlist reference".
+    # For subscription-based network routing replace the wildcard with *.business.githubcopilot.com or
+    # *.enterprise.githubcopilot.com. Verify against the current reference before enabling.
+    copilotFqdnPatterns:
+      - "*.githubcopilot.com"
+      - copilot-proxy.githubusercontent.com
+      - copilot-telemetry.githubusercontent.com
+      - collector.github.com

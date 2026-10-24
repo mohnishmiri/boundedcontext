@@ -1,0 +1,212 @@
+{{- define "bcp.np.dnsEgress" -}}
+- to:
+    - namespaceSelector:
+        matchLabels:
+          {{- toYaml .dns.namespaceSelector | nindent 10 }}
+  ports:
+    - { protocol: UDP, port: 53 }
+    - { protocol: TCP, port: 53 }
+{{- end -}}
+{{- define "bcp.np.postgresEgress" -}}
+- to:
+    {{- range .postgres.cidrs }}
+    - ipBlock:
+        cidr: {{ . }}
+    {{- end }}
+  ports:
+    - { protocol: TCP, port: {{ .postgres.port }} }
+{{- end -}}
+{{- define "bcp.np.httpsEgress" -}}
+{{- if not .cilium.enabled }}
+# Public HTTPS only (GitHub, Copilot). Private ranges are excluded to limit SSRF/lateral movement.
+- to:
+    - ipBlock:
+        cidr: {{ .https.cidr }}
+        {{- with .https.except }}
+        except:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+  ports:
+    - { protocol: TCP, port: 443 }
+{{- end }}
+{{- end -}}
+{{- define "bcp.np.otlpEgress" -}}
+{{- if .otlp.enabled }}
+- to:
+    - namespaceSelector:
+        matchLabels:
+          {{- toYaml .otlp.namespaceSelector | nindent 10 }}
+  ports:
+    - { protocol: TCP, port: {{ .otlp.port }} }
+{{- end }}
+{{- end -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- $fullname := include "bcp.fullname" . }}
+# Default deny for every pod of this release.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny
+  labels:
+    {{- include "bcp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "bcp.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+{{- if .Values.frontend.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-frontend
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "frontend") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "frontend") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml $np.ingressController.namespaceSelector | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    {{- with (include "bcp.np.dnsEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "api") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+{{- end }}
+{{- if .Values.api.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "api") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "api") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml $np.ingressController.namespaceSelector | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "frontend") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml $np.monitoring.namespaceSelector | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 9090 }
+  egress:
+    {{- with (include "bcp.np.dnsEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.postgresEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.httpsEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.otlpEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+{{- end }}
+{{- if .Values.worker.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-worker
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "worker") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml $np.monitoring.namespaceSelector | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 9091 }
+  egress:
+    {{- with (include "bcp.np.dnsEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.postgresEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.httpsEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.otlpEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+{{- end }}
+{{- if .Values.migrations.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-migrate
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "migrate") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "migrate") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  egress:
+    {{- with (include "bcp.np.dnsEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.postgresEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+{{- end }}
+{{- if $np.cilium.enabled }}
+{{- range $component := list "api" "worker" }}
+{{- if (index $.Values $component).enabled }}
+---
+# Hostname-based egress (requires Azure CNI powered by Cilium with Advanced Container Networking Services).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ $fullname }}-{{ $component }}-fqdn
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" $component) | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: {{ $component }}
+  egress:
+    # DNS through the Cilium proxy is required for toFQDNs to learn IPs.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: ANY }
+          rules:
+            dns:
+              - matchPattern: "*"
+    - toFQDNs:
+        {{- range $np.cilium.githubFqdns }}
+        - matchName: {{ . | quote }}
+        {{- end }}
+        {{- if eq $component "worker" }}
+        {{- range $np.cilium.copilotFqdnPatterns }}
+        {{- if contains "*" . }}
+        - matchPattern: {{ . | quote }}
+        {{- else }}
+        - matchName: {{ . | quote }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

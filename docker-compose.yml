@@ -1,0 +1,106 @@
+# Local development stack — no GitHub or Copilot credentials needed.
+#
+#   scripts/start.sh                    (picks free ports, waits until healthy, prints the URLs)
+#   scripts/stop.sh                     (--wipe also deletes the database and dev secrets)
+#
+# Plain compose works too: `docker compose up --build`, then open http://localhost:3000 and sign in through the
+# mock GitHub (e.g. as "octocat"). Host ports can be moved if they are taken: BCP_PG_PORT, BCP_API_PORT,
+# BCP_UI_PORT, BCP_MOCK_PORT (BCP_PUBLIC_URL must then match the UI port, e.g. http://localhost:3001).
+#
+# Components: PostgreSQL, mock GitHub (OAuth + REST, seeded fixtures), API, worker running the *fake* Copilot
+# CLI, and the frontend (nginx). Everything here is for development only; see docs/local-development.md for
+# running against real GitHub / Copilot.
+
+name: bounded-context-portal
+
+x-backend-env: &backend-env
+  BCP_DATABASE_URL: postgres://bcp:bcp@postgres:5432/bcp
+  BCP_PUBLIC_URL: ${BCP_PUBLIC_URL:-http://localhost:3000}
+  # Server-side calls go to the mock by service name; the browser is redirected to the mock's host port.
+  BCP_GITHUB_API_URL: http://mock-github:9000
+  BCP_GITHUB_OAUTH_URL: http://mock-github:9000
+  BCP_GITHUB_WEB_URL: http://localhost:${BCP_MOCK_PORT:-9000}
+  BCP_GITHUB_APP_ID: "4242"
+  BCP_GITHUB_APP_SLUG: bounded-context-portal-dev
+  BCP_GITHUB_CLIENT_ID: Iv1.localdev
+  BCP_GITHUB_CLIENT_SECRET: local-dev-secret
+  BCP_GITHUB_PRIVATE_KEY_FILE: /secrets/github-app-private-key
+  BCP_TOKEN_ENCRYPTION_KEY_FILE: /secrets/token-encryption-key
+  BCP_MODELS_SHOW_UNVERIFIED: "true"
+  BCP_LOG_FORMAT: pretty
+  RUST_LOG: info,bcp_api=debug,bcp_worker=debug,sqlx=warn
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: bcp
+      POSTGRES_PASSWORD: bcp
+      POSTGRES_DB: bcp
+    ports: ["127.0.0.1:${BCP_PG_PORT:-5432}:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bcp -d bcp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Generates a throwaway GitHub App key and token-encryption key once (kept in the dev-secrets volume).
+  dev-secrets:
+    build: { context: ., dockerfile: backend/Dockerfile, target: dev-tools }
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        [ -s /secrets/github-app-private-key ] || openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /secrets/github-app-private-key
+        [ -s /secrets/token-encryption-key ] || openssl rand -base64 32 > /secrets/token-encryption-key
+        chmod 0444 /secrets/*
+    volumes: [devsecrets:/secrets]
+
+  mock-github:
+    build: { context: ., dockerfile: backend/Dockerfile, target: dev-tools }
+    environment:
+      MOCK_GITHUB_LISTEN: 0.0.0.0:9000
+      MOCK_GITHUB_PUBLIC_URL: http://localhost:${BCP_MOCK_PORT:-9000}
+    ports: ["127.0.0.1:${BCP_MOCK_PORT:-9000}:9000"]
+
+  api:
+    build: { context: ., dockerfile: backend/Dockerfile, target: api }
+    environment:
+      <<: *backend-env
+      BCP_COOKIE_SECURE: "false"
+      BCP_RUN_MIGRATIONS: "true"
+      BCP_RATE_LIMIT_PER_MINUTE: "600"
+      BCP_JOB_CREATE_LIMIT_PER_HOUR: "200"
+    ports: ["127.0.0.1:${BCP_API_PORT:-8080}:8080"]
+    volumes: [devsecrets:/secrets:ro]
+    depends_on:
+      postgres: { condition: service_healthy }
+      dev-secrets: { condition: service_completed_successfully }
+      mock-github: { condition: service_started }
+
+  worker:
+    build: { context: ., dockerfile: backend/Dockerfile, target: worker-dev }
+    environment:
+      <<: *backend-env
+      BCP_WORKER_CONCURRENCY: "2"
+      BCP_GENERATE_MAX_ATTEMPTS: "1"
+    read_only: true
+    tmpfs: ["/work:uid=10001,gid=10001,mode=0700", "/tmp:mode=1777", "/home/worker:uid=10001,gid=10001,mode=0700"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes: [devsecrets:/secrets:ro]
+    depends_on:
+      api: { condition: service_started }
+
+  frontend:
+    build: { context: ./frontend }
+    environment:
+      API_UPSTREAM: http://api:8080
+    ports: ["127.0.0.1:${BCP_UI_PORT:-3000}:8080"]
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  devsecrets:

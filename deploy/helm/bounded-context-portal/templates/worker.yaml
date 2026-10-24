@@ -1,0 +1,197 @@
+{{- if .Values.worker.enabled }}
+{{- $w := .Values.worker }}
+{{- if not (has $w.mode (list "loop" "once")) }}
+{{- fail "worker.mode must be loop or once" }}
+{{- end }}
+{{- if and (eq $w.mode "once") (not .Values.keda.enabled) }}
+{{- fail "worker.mode=once requires keda.enabled=true (KEDA ScaledJob)" }}
+{{- end }}
+{{- if eq $w.mode "loop" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bcp.fullname" . }}-worker
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+spec:
+  {{- if not (or .Values.keda.enabled $w.autoscaling.enabled) }}
+  replicas: {{ $w.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 8 }}
+        {{- with (include "bcp.podIdentityLabels" . | trim) }}{{ . | nindent 8 }}{{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | trunc 16 }}
+        {{- include "bcp.sharedChecksums" . | nindent 8 }}
+        {{- with (include "bcp.metricsAnnotations" (dict "ctx" $ "port" 9091) | trim) }}{{ . | nindent 8 }}{{- end }}
+        {{- with $w.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "bcp.worker.podSpec" (dict "ctx" $ "once" false) | nindent 6 }}
+---
+# Metrics endpoint for PodMonitor / ServiceMonitor discovery. Nothing else talks to the worker.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bcp.fullname" . }}-worker
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: metrics
+      protocol: TCP
+{{- if .Values.keda.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "bcp.fullname" . }}-worker
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "bcp.fullname" . }}-worker
+  minReplicaCount: {{ $w.scaledObject.minReplicaCount }}
+  maxReplicaCount: {{ $w.scaledObject.maxReplicaCount }}
+  pollingInterval: {{ $w.scaledObject.pollingInterval }}
+  cooldownPeriod: {{ $w.scaledObject.cooldownPeriod }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ $w.scaledObject.scaleDownStabilizationSeconds }}
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 120
+  triggers:
+    - type: postgresql
+      metadata:
+        # Pending + in-flight tasks; each replica handles BCP_WORKER_CONCURRENCY tasks.
+        query: "SELECT COUNT(*) FROM job_tasks WHERE state IN ('pending','running')"
+        targetQueryValue: {{ $w.concurrency | quote }}
+        activationTargetQueryValue: "0"
+      authenticationRef:
+        name: {{ include "bcp.fullname" . }}-postgres
+{{- else if $w.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "bcp.fullname" . }}-worker
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "bcp.fullname" . }}-worker
+  minReplicas: {{ $w.autoscaling.minReplicas }}
+  maxReplicas: {{ $w.autoscaling.maxReplicas }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $w.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- if $w.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "bcp.fullname" . }}-worker
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+spec:
+  maxUnavailable: {{ $w.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" "worker") | nindent 6 }}
+{{- end }}
+{{- else }}
+# worker.mode=once: KEDA creates one Kubernetes Job per pending task; each pod runs `bcp-worker once`
+# (claims one task, runs it, exits). No HTTP port, no probes.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: {{ include "bcp.fullname" . }}-worker
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+spec:
+  pollingInterval: {{ $w.scaledJob.pollingInterval }}
+  maxReplicaCount: {{ $w.scaledJob.maxReplicaCount }}
+  successfulJobsHistoryLimit: {{ $w.scaledJob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $w.scaledJob.failedJobsHistoryLimit }}
+  # The query counts only unclaimed tasks, so running Jobs must not be subtracted again.
+  scalingStrategy:
+    strategy: accurate
+  rollout:
+    strategy: gradual   # config changes do not kill running agent Jobs
+  jobTargetRef:
+    parallelism: 1
+    completions: 1
+    # Retries are owned by the task queue (attempts/backoff), not by Kubernetes.
+    backoffLimit: 0
+    activeDeadlineSeconds: {{ $w.scaledJob.activeDeadlineSeconds }}
+    ttlSecondsAfterFinished: {{ $w.scaledJob.ttlSecondsAfterFinished }}
+    template:
+      metadata:
+        labels:
+          {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 10 }}
+          {{- with (include "bcp.podIdentityLabels" . | trim) }}{{ . | nindent 10 }}{{- end }}
+        annotations:
+          checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | trunc 16 }}
+          {{- include "bcp.sharedChecksums" . | nindent 10 }}
+          {{- with $w.podAnnotations }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+      spec:
+        {{- include "bcp.worker.podSpec" (dict "ctx" $ "once" true) | nindent 8 }}
+  triggers:
+    - type: postgresql
+      metadata:
+        query: "SELECT COUNT(*) FROM job_tasks WHERE state = 'pending' AND run_after <= now()"
+        targetQueryValue: "1"
+        activationTargetQueryValue: "0"
+      authenticationRef:
+        name: {{ include "bcp.fullname" . }}-postgres
+{{- end }}
+{{- if .Values.keda.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "bcp.fullname" . }}-postgres
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: connection
+      name: {{ include "bcp.kedaConnectionSecretName" . }}
+      key: {{ .Values.keda.connectionSecret.key }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,30 @@
+[package]
+name = "bcp-integration-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "End-to-end tests: API + worker + PostgreSQL + mock GitHub + scripted agent runtime"
+
+[dependencies]
+
+[dev-dependencies]
+bcp-core.workspace = true
+bcp-agent.workspace = true
+bcp-github.workspace = true
+bcp-store.workspace = true
+bcp-api = { path = "../../crates/bcp-api" }
+bcp-worker = { path = "../../crates/bcp-worker" }
+mock-github.workspace = true
+axum.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+url.workspace = true
+uuid.workspace = true

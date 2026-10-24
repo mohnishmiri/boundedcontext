@@ -1,0 +1,17 @@
+apiVersion: v2
+name: bounded-context-portal
+description: >-
+  Bounded Context Portal — web UI, Rust API and Copilot CLI worker that turn the existing bounded-context
+  agent into a repository-to-PR workflow on AKS.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"
+keywords: [github, copilot, ddd, bounded-context, aks]
+annotations:
+  # Optional CRDs used by this chart (rendered only when enabled in values):
+  #   secrets-store.csi.x-k8s.io/v1  SecretProviderClass   (AKS azure-keyvault-secrets-provider add-on)
+  #   keda.sh/v1alpha1               ScaledObject/ScaledJob/TriggerAuthentication (AKS KEDA add-on)
+  #   cilium.io/v2                   CiliumNetworkPolicy   (Azure CNI powered by Cilium + ACNS)
+  #   azmonitoring.coreos.com/v1     PodMonitor            (Azure Monitor managed Prometheus)
+  bcp/optional-crds: "secrets-store.csi.x-k8s.io,keda.sh,cilium.io,azmonitoring.coreos.com"

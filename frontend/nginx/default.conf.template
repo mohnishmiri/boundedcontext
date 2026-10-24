@@ -1,0 +1,85 @@
+# Rendered at container start by the nginx image entrypoint (envsubst) into /etc/nginx/conf.d/default.conf.
+# Only variables defined in the environment are substituted: ${API_UPSTREAM} and ${CSP_IMG_SRC} (defaults set in
+# the Dockerfile). nginx's own variables use the $name form and are left alone.
+#
+# Read-only root filesystem: /etc/nginx/conf.d must be writable (emptyDir); pid and temp paths of
+# nginx-unprivileged already live under /tmp.
+
+# Cache policy: fingerprinted assets forever, everything else (index.html, SPA routes) revalidated. API responses
+# keep the API's own headers (empty value = header not added).
+map $uri $bcp_cache_control {
+    default        "no-cache";
+    ~^/assets/     "public, max-age=31536000, immutable";
+    ~^/api/        "";
+}
+
+# Behind the ingress the original scheme/host arrive in X-Forwarded-*; fall back to this hop's values.
+map $http_x_forwarded_proto $bcp_forwarded_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+map $http_x_forwarded_host $bcp_forwarded_host {
+    default $http_x_forwarded_host;
+    ""      $http_host;
+}
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    server_tokens off;
+    absolute_redirect off;
+    client_max_body_size 1m;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    # text/event-stream is deliberately absent: SSE must never be compressed or buffered.
+    gzip_types text/css application/javascript application/json image/svg+xml text/plain;
+
+    # Security headers for every response. No location below uses add_header, so these are inherited everywhere.
+    # style-src needs 'unsafe-inline' because Mermaid diagrams carry inline <style> and style attributes.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: ${CSP_IMG_SRC}; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cache-Control $bcp_cache_control always;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # API (local/compose parity; in AKS the ingress routes /api straight to the API service).
+    location /api/ {
+        proxy_pass ${API_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        # Host and Origin are passed through unchanged so the API's CSRF Origin check sees the browser's values.
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $bcp_forwarded_host;
+        proxy_set_header X-Forwarded-Proto $bcp_forwarded_proto;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # Server-Sent Events (/api/bounded-context/jobs/{id}/events) stay open for the whole run.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location /assets/ {
+        try_files $uri =404;
+    }
+
+    # Client-side routes fall back to the SPA shell.
+    location / {
+        try_files $uri /index.html;
+    }
+}

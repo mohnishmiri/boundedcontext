@@ -1,0 +1,525 @@
+openapi: 3.1.0
+info:
+  title: Bounded Context Portal API
+  version: 0.1.0
+  description: >-
+    Machine-readable form of docs/api.md. Authentication is the `bcp_session` cookie set by the OAuth callback.
+    Mutating requests must send `X-Requested-With: bcp` and an `Origin` equal to the portal's public URL.
+servers:
+  - url: /api
+security:
+  - session: []
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: bcp_session
+  parameters:
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Owner:
+      name: owner
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$' }
+    Repo:
+      name: repo
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[A-Za-z0-9._-]{1,100}$' }
+    CsrfHeader:
+      name: X-Requested-With
+      in: header
+      required: true
+      schema: { type: string, const: bcp }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+  responses:
+    Error:
+      description: Error envelope (any non-2xx).
+      headers:
+        X-Request-Id: { schema: { type: string } }
+        Retry-After: { schema: { type: integer }, description: Seconds, on 429. }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+  schemas:
+    ErrorCode:
+      type: string
+      enum: [unauthenticated, csrf_rejected, forbidden, not_found, validation_failed, duplicate_job, conflict,
+             rate_limited, payload_too_large, github_unavailable, github_auth_expired, github_rate_limited,
+             repository_access_denied, app_not_installed, model_unavailable, model_locked_by_agent,
+             copilot_unauthorized, agent_failed, agent_timeout, agent_unavailable, output_missing, output_empty,
+             output_invalid, output_too_large, repository_too_large, base_branch_changed, branch_conflict,
+             cancelled, internal]
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, retryable, request_id]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string }
+            retryable: { type: boolean }
+            details: { type: object, additionalProperties: true }
+            request_id: { type: string }
+    JobStatus: { type: string, enum: [queued, running, succeeded, failed, cancelled] }
+    GenerationStage: { type: string, enum: [queued, preparing, fetching_repository, running_agent, validating_output, completed] }
+    PublishStatus: { type: string, enum: [not_started, queued, running, succeeded, failed] }
+    PublishStage: { type: string, enum: [queued, checking_base, creating_commit, creating_branch, creating_pull_request, completed] }
+    StepState: { type: string, enum: [pending, active, done, failed, skipped] }
+    ChangeType: { type: string, enum: [added, modified, deleted] }
+    Step:
+      type: object
+      required: [key, label, state, started_at, finished_at]
+      properties:
+        key: { type: string }
+        label: { type: string }
+        state: { $ref: '#/components/schemas/StepState' }
+        started_at: { type: [string, 'null'], format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+    JobError:
+      type: [object, 'null']
+      required: [code, message, retryable]
+      properties:
+        code: { $ref: '#/components/schemas/ErrorCode' }
+        message: { type: string }
+        retryable: { type: boolean }
+    User:
+      type: object
+      required: [id, login, name, avatar_url]
+      properties:
+        id: { type: string, format: uuid }
+        login: { type: string }
+        name: { type: [string, 'null'] }
+        avatar_url: { type: [string, 'null'] }
+    JobSummary:
+      type: object
+      required: [id, short_id, owner, repo, base_branch, model, status, stage, publish_status, pr_url, created_at, finished_at, requested_by]
+      properties:
+        id: { type: string, format: uuid }
+        short_id: { type: string, minLength: 8, maxLength: 8 }
+        owner: { type: string }
+        repo: { type: string }
+        base_branch: { type: string }
+        model: { type: string }
+        status: { $ref: '#/components/schemas/JobStatus' }
+        stage: { $ref: '#/components/schemas/GenerationStage' }
+        publish_status: { $ref: '#/components/schemas/PublishStatus' }
+        pr_url: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+        requested_by: { type: string }
+    Job:
+      allOf:
+        - $ref: '#/components/schemas/JobSummary'
+        - type: object
+          required: [repository_url, base_sha, agent, inputs, steps, error, cancel_requested, can_cancel, can_publish,
+                     can_retry, started_at, updated_at, duration_ms, output, publish]
+          properties:
+            repository_url: { type: string }
+            base_sha: { type: [string, 'null'] }
+            agent:
+              type: object
+              properties:
+                id: { type: string }
+                version: { type: string }
+                placeholder: { type: boolean }
+            inputs: { type: object, additionalProperties: { type: string } }
+            steps: { type: array, items: { $ref: '#/components/schemas/Step' } }
+            error: { $ref: '#/components/schemas/JobError' }
+            cancel_requested: { type: boolean }
+            can_cancel: { type: boolean }
+            can_publish: { type: boolean }
+            can_retry: { type: boolean }
+            started_at: { type: [string, 'null'], format: date-time }
+            updated_at: { type: string, format: date-time }
+            duration_ms: { type: [integer, 'null'] }
+            output:
+              type: [object, 'null']
+              properties:
+                primary_path: { type: string }
+                files:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      path: { type: string }
+                      change_type: { type: string, enum: [added, modified] }
+                      size_bytes: { type: integer }
+                unexpected_changes:
+                  type: array
+                  description: Changes outside the allowed output paths. Never committed.
+                  items:
+                    type: object
+                    properties:
+                      path: { type: string }
+                      change_type: { $ref: '#/components/schemas/ChangeType' }
+            publish:
+              type: object
+              properties:
+                status: { $ref: '#/components/schemas/PublishStatus' }
+                stage: { oneOf: [{ $ref: '#/components/schemas/PublishStage' }, { type: 'null' }] }
+                steps: { type: array, items: { $ref: '#/components/schemas/Step' } }
+                branch: { type: [string, 'null'] }
+                commit_sha: { type: [string, 'null'] }
+                commit_url: { type: [string, 'null'] }
+                pr_number: { type: [integer, 'null'] }
+                pr_url: { type: [string, 'null'] }
+                error: { $ref: '#/components/schemas/JobError' }
+                updated_at: { type: [string, 'null'], format: date-time }
+    LogEntry:
+      type: object
+      required: [seq, ts, level, stage, message]
+      properties:
+        seq: { type: integer, description: Globally increasing (gaps possible). }
+        ts: { type: string, format: date-time }
+        level: { type: string, enum: [debug, info, warn, error] }
+        stage: { type: string }
+        message: { type: string, description: Redacted. }
+    PageMeta:
+      type: object
+      required: [page, per_page, has_more]
+      properties:
+        page: { type: integer }
+        per_page: { type: integer }
+        has_more: { type: boolean }
+        total: { type: integer }
+    Repository:
+      type: object
+      properties:
+        id: { type: integer }
+        owner: { type: string }
+        name: { type: string }
+        full_name: { type: string }
+        private: { type: boolean }
+        default_branch: { type: string }
+        html_url: { type: string }
+        description: { type: [string, 'null'] }
+        permissions:
+          type: object
+          properties: { pull: { type: boolean }, push: { type: boolean }, admin: { type: boolean } }
+        updated_at: { type: [string, 'null'] }
+    AgentInput:
+      type: object
+      properties:
+        name: { type: string }
+        label: { type: string }
+        help: { type: [string, 'null'] }
+        required: { type: boolean }
+        kind: { type: string, enum: [text, select, path] }
+        choices: { type: [array, 'null'], items: { type: string } }
+        default: { type: [string, 'null'] }
+        max_length: { type: integer }
+    CreateJob:
+      type: object
+      additionalProperties: false
+      required: [owner, repo, base_branch, model]
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        base_branch: { type: string }
+        model: { type: string }
+        inputs: { type: object, additionalProperties: { type: string } }
+
+paths:
+  /auth/github:
+    get:
+      summary: Start GitHub sign-in (state + PKCE)
+      security: []
+      parameters:
+        - { name: return_to, in: query, schema: { type: string }, description: Same-origin path. }
+      responses:
+        '303': { description: Redirect to GitHub authorisation. }
+  /auth/github/callback:
+    get:
+      summary: OAuth callback; sets the session cookie
+      security: []
+      parameters:
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+      responses:
+        '303': { description: 'Redirect to return_to, or to /?auth_error=<code> on failure.' }
+  /auth/me:
+    get:
+      summary: Current user
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { user: { $ref: '#/components/schemas/User' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /auth/logout:
+    post:
+      summary: End the session
+      parameters: [{ $ref: '#/components/parameters/CsrfHeader' }]
+      responses:
+        '204': { description: Signed out. }
+        default: { $ref: '#/components/responses/Error' }
+  /github/organizations:
+    get:
+      summary: Accounts where the App is installed and the user has access
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        installation_id: { type: integer }
+                        login: { type: string }
+                        type: { type: string, enum: [Organization, User] }
+                        avatar_url: { type: [string, 'null'] }
+                  install_url: { type: string }
+        default: { $ref: '#/components/responses/Error' }
+  /github/repositories:
+    get:
+      summary: Repositories of one account (user ∩ App installation)
+      parameters:
+        - { name: owner, in: query, required: true, schema: { type: string } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { $ref: '#/components/parameters/Page' }
+        - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties: { items: { type: array, items: { $ref: '#/components/schemas/Repository' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /github/repositories/{owner}/{repo}:
+    get:
+      summary: Repository detail with portal capabilities
+      parameters: [{ $ref: '#/components/parameters/Owner' }, { $ref: '#/components/parameters/Repo' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Repository'
+                  - type: object
+                    properties:
+                      can_generate: { type: boolean }
+                      can_publish: { type: boolean }
+                      reason: { type: [string, 'null'] }
+        default: { $ref: '#/components/responses/Error' }
+  /github/repositories/{owner}/{repo}/branches:
+    get:
+      summary: Branches (default branch first)
+      parameters:
+        - { $ref: '#/components/parameters/Owner' }
+        - { $ref: '#/components/parameters/Repo' }
+        - { name: q, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/Page' }
+        - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties:
+                      default_branch: { type: string }
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name: { type: string }
+                            commit_sha: { type: string }
+                            protected: { type: boolean }
+        default: { $ref: '#/components/responses/Error' }
+  /agent:
+    get:
+      summary: The installed agent
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+                  description: { type: string }
+                  version: { type: string }
+                  placeholder: { type: boolean }
+                  output_paths: { type: array, items: { type: string } }
+                  inputs: { type: array, items: { $ref: '#/components/schemas/AgentInput' } }
+  /models:
+    get:
+      summary: Selectable models
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        vendor: { type: string }
+                        description: { type: [string, 'null'] }
+                        multiplier: { type: [number, 'null'] }
+                        is_default: { type: boolean }
+                  default_model: { type: string }
+                  locked_model: { type: [string, 'null'] }
+                  lock_reason: { type: [string, 'null'] }
+                  entitlement_note: { type: string }
+  /bounded-context/jobs:
+    get:
+      summary: The caller's jobs
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/JobStatus' } }
+        - { name: owner, in: query, schema: { type: string } }
+        - { name: repo, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/Page' }
+        - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties: { items: { type: array, items: { $ref: '#/components/schemas/JobSummary' } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      summary: Request a generation
+      parameters: [{ $ref: '#/components/parameters/CsrfHeader' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateJob' }
+      responses:
+        '202':
+          description: Queued
+          content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /bounded-context/jobs/{job_id}:
+    get:
+      summary: Job detail
+      parameters: [{ $ref: '#/components/parameters/JobId' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /bounded-context/jobs/{job_id}/logs:
+    get:
+      summary: Redacted log lines after a sequence number
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { name: after, in: query, schema: { type: integer, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 200 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/LogEntry' } }
+                  next_after: { type: integer }
+        default: { $ref: '#/components/responses/Error' }
+  /bounded-context/jobs/{job_id}/events:
+    get:
+      summary: Server-Sent Events (`job`, `log`, `ping`); closes when the job and its publish state are settled
+      parameters: [{ $ref: '#/components/parameters/JobId' }]
+      responses:
+        '200': { description: Event stream, content: { text/event-stream: { schema: { type: string } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /bounded-context/jobs/{job_id}/diff:
+    get:
+      summary: Generated files with diffs (succeeded jobs only)
+      parameters: [{ $ref: '#/components/parameters/JobId' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  base_sha: { type: string }
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path: { type: string }
+                        change_type: { type: string, enum: [added, modified] }
+                        base_content: { type: [string, 'null'] }
+                        new_content: { type: string }
+                        unified_diff: { type: string }
+                        size_bytes: { type: integer }
+                        sha256: { type: string }
+                  unexpected_changes:
+                    type: array
+                    items:
+                      type: object
+                      properties: { path: { type: string }, change_type: { $ref: '#/components/schemas/ChangeType' } }
+        default: { $ref: '#/components/responses/Error' }
+  /bounded-context/jobs/{job_id}/output:
+    get:
+      summary: Primary Markdown output (download)
+      parameters: [{ $ref: '#/components/parameters/JobId' }]
+      responses:
+        '200': { description: Markdown file, content: { text/markdown: { schema: { type: string } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /bounded-context/jobs/{job_id}/pull-request:
+    post:
+      summary: Publish as branch + commit + pull request (idempotent)
+      parameters: [{ $ref: '#/components/parameters/JobId' }, { $ref: '#/components/parameters/CsrfHeader' }]
+      responses:
+        '202': { description: Publishing queued, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        '200': { description: Already queued, running or done, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /bounded-context/jobs/{job_id}/cancel:
+    post:
+      summary: Cancel a queued or running job
+      parameters: [{ $ref: '#/components/parameters/JobId' }, { $ref: '#/components/parameters/CsrfHeader' }]
+      responses:
+        '202': { description: Cancelled or cancellation requested, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /bounded-context/jobs/{job_id}/retry:
+    post:
+      summary: New job with the same inputs (failed or cancelled jobs)
+      parameters: [{ $ref: '#/components/parameters/JobId' }, { $ref: '#/components/parameters/CsrfHeader' }]
+      responses:
+        '202': { description: New job, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        default: { $ref: '#/components/responses/Error' }

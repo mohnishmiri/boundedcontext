@@ -1,0 +1,23 @@
+{{- if .Values.metrics.podMonitor.enabled }}
+{{- range $component := list "api" "worker" }}
+{{- $c := index $.Values $component }}
+{{- if and $c.enabled (or (eq $component "api") (eq $.Values.worker.mode "loop")) }}
+---
+apiVersion: {{ $.Values.metrics.podMonitor.apiVersion }}
+kind: PodMonitor
+metadata:
+  name: {{ include "bcp.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" $component) | nindent 4 }}
+spec:
+  jobLabel: app.kubernetes.io/component
+  selector:
+    matchLabels:
+      {{- include "bcp.componentSelectorLabels" (dict "ctx" $ "component" $component) | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ $.Values.metrics.podMonitor.interval }}
+{{- end }}
+{{- end }}
+{{- end }}

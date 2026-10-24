@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: bcp
+          POSTGRES_PASSWORD: bcp
+          POSTGRES_DB: bcp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bcp -d bcp" --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CARGO_TERM_COLOR: always
+      # Integration tests create one database per test; fail instead of skipping when it is missing.
+      BCP_TEST_DATABASE_URL: postgres://bcp:bcp@localhost:5432/bcp
+      BCP_TEST_REQUIRE_DB: "1"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Validate the agent bundle
+        run: cargo run --locked -q -p bcp-agent --bin bcp-agent-run -- validate --bundle ../agent-bundle
+
+  frontend:
+    name: Frontend (typecheck, lint, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint and render every environment
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/bounded-context-portal
+          helm lint "$chart" -f "$chart/values-dev.yaml"
+          for env in dev staging prod; do
+            echo "::group::$env"
+            helm lint "$chart" -f "$chart/values-$env.yaml"
+            helm template bcp "$chart" -n bcp -f "$chart/values-$env.yaml" > "/tmp/rendered-$env.yaml"
+            echo "::endgroup::"
+          done
+      - name: Validate rendered manifests against Kubernetes schemas
+        run: |
+          set -euo pipefail
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          ./kubeconform -strict -summary -ignore-missing-schemas /tmp/rendered-*.yaml
+
+  images:
+    name: Container images (build + scan)
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: bcp-api, file: backend/Dockerfile, target: api, context: . }
+          - { name: bcp-worker, file: backend/Dockerfile, target: worker, context: . }
+          - { name: bcp-frontend, file: frontend/Dockerfile, target: "", context: frontend }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          tags: ${{ matrix.name }}:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - name: Scan for fixable critical vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ matrix.name }}:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

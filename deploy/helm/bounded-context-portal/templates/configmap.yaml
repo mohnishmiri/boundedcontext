@@ -1,0 +1,71 @@
+{{- define "bcp.sharedConfig" -}}
+BCP_PUBLIC_URL: {{ required "config.publicUrl is required" .Values.config.publicUrl | quote }}
+BCP_GITHUB_API_URL: {{ .Values.config.github.apiUrl | quote }}
+BCP_GITHUB_WEB_URL: {{ .Values.config.github.webUrl | quote }}
+{{- with .Values.config.github.oauthUrl }}
+BCP_GITHUB_OAUTH_URL: {{ . | quote }}
+{{- end }}
+BCP_GITHUB_APP_ID: {{ .Values.config.github.appId | quote }}
+BCP_GITHUB_CLIENT_ID: {{ .Values.config.github.clientId | quote }}
+BCP_AGENT_BUNDLE_DIR: {{ .Values.config.agentBundleDir | quote }}
+BCP_MODELS_FILE: {{ .Values.config.modelsFile | quote }}
+BCP_MODELS_SHOW_UNVERIFIED: {{ .Values.config.modelsShowUnverified | quote }}
+BCP_LOG_FORMAT: {{ .Values.config.logFormat | quote }}
+RUST_LOG: {{ .Values.config.rustLog | quote }}
+{{- with .Values.config.otel.endpoint }}
+OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+{{- end }}
+{{- range $k, $v := .Values.config.extraEnv }}
+{{ $k }}: {{ $v | quote }}
+{{- end }}
+{{- end -}}
+{{- if .Values.api.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bcp.fullname" . }}-api
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "api") | nindent 4 }}
+data:
+  {{- include "bcp.sharedConfig" . | nindent 2 }}
+  BCP_GITHUB_APP_SLUG: {{ .Values.config.github.appSlug | quote }}
+  BCP_API_LISTEN: "0.0.0.0:8080"
+  BCP_API_METRICS_LISTEN: "0.0.0.0:9090"
+  OTEL_SERVICE_NAME: "bcp-api"
+  {{- range $k, $v := .Values.api.env }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+{{- end }}
+{{- if .Values.worker.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bcp.fullname" . }}-worker
+  labels:
+    {{- include "bcp.componentLabels" (dict "ctx" $ "component" "worker") | nindent 4 }}
+data:
+  {{- include "bcp.sharedConfig" . | nindent 2 }}
+  BCP_WORKER_LISTEN: "0.0.0.0:8081"
+  BCP_WORKER_METRICS_LISTEN: "0.0.0.0:9091"
+  BCP_WORKER_CONCURRENCY: {{ .Values.worker.concurrency | quote }}
+  BCP_WORK_DIR: {{ .Values.worker.workDir.path | quote }}
+  HOME: "/home/worker"
+  COPILOT_AUTO_UPDATE: "false"
+  OTEL_SERVICE_NAME: "bcp-worker"
+  {{- range $k, $v := .Values.worker.env }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+{{- end }}
+{{- if .Values.models.content }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bcp.fullname" . }}-models
+  labels:
+    {{- include "bcp.labels" . | nindent 4 }}
+data:
+  models.yaml: |
+    {{- .Values.models.content | nindent 4 }}
+{{- end }}

@@ -1,0 +1,44 @@
+# Model catalog — operator maintained. Served by GET /api/models and enforced server-side.
+#
+# Copilot CLI has no documented non-interactive way to list models, and docs.github.com does not publish the
+# `--model` identifier strings for every model (checked 2026-10-24). Confirm identifiers for your plan with
+# `/model` in an interactive `copilot` session before adding them. Entries with `verified: false` are hidden
+# from users unless BCP_MODELS_SHOW_UNVERIFIED=true.
+#
+# Availability for an individual user is still decided by GitHub Copilot at run time (plan, org model
+# policies). A model in this list that the user cannot use fails the job with `model_unavailable` — the portal
+# never substitutes another model.
+
+default: auto
+
+models:
+  - id: auto
+    name: Auto (Copilot chooses)
+    vendor: GitHub
+    description: Copilot picks an available model and honours your organisation's model policies.
+    verified: true      # `--model auto` per Copilot CLI command reference
+
+  - id: claude-haiku-4.5
+    name: Claude Haiku 4.5
+    vendor: Anthropic
+    verified: true      # identifier appears in the Copilot CLI programmatic reference
+
+  - id: gpt-5.3-codex
+    name: GPT-5.3-Codex
+    vendor: OpenAI
+    verified: true      # identifier appears in the Copilot CLI configuration reference
+
+  - id: gpt-6-astra
+    name: GPT-6 Astra
+    vendor: OpenAI
+    verified: true      # identifier appears in the Copilot CLI programmatic reference
+
+  - id: claude-sonnet-5.5
+    name: Claude Sonnet 5.5
+    vendor: Anthropic
+    verified: false     # listed as included in Copilot CLI; identifier not documented
+
+  - id: claude-opus-5.5
+    name: Claude Opus 5.5
+    vendor: Anthropic
+    verified: false     # Pro+/Max/Business/Enterprise only; identifier not documented
