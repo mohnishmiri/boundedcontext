@@ -22,6 +22,13 @@ pub const BUILTIN_VARS: &[&str] = &["owner", "repo", "branch", "sha", "output_pa
 
 static TOOL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.:*()/@ -]{1,128}$").unwrap());
 static MCP_NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]{1,64}$").unwrap());
+/// Tools a repository-sourced bundle may be granted.
+const SAFE_ALLOW_TOOLS: &[&str] = &["read", "write", "edit", "search"];
+/// Tools always denied for repository-sourced bundles (deny wins over allow in Copilot CLI).
+pub const HARD_DENY_TOOLS: &[&str] = &["shell", "url", "memory"];
+/// File types a repository-sourced bundle may write to the pull request.
+pub const SAFE_OUTPUT_EXTENSIONS: &[&str] = &["md", "mdx", "txt", "yaml", "yml", "json"];
+
 static AGENT_ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$").unwrap());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -130,6 +137,10 @@ pub struct Manifest {
     pub schema_version: u32,
     #[serde(default)]
     pub placeholder: bool,
+    /// Directory (relative to the bundle) holding `<agent.id>.agent.md` and the files it references. Defaults
+    /// to `agents`; use `.` when the manifest sits next to the agent files in an existing agent folder.
+    #[serde(default)]
+    pub agents_dir: Option<String>,
     pub agent: AgentSection,
     pub prompt: PromptSection,
     #[serde(default)]
@@ -146,6 +157,8 @@ pub struct AgentFrontmatter {
     pub description: Option<String>,
     /// `model:` pins the model; Copilot CLI then ignores `--model`.
     pub model: Option<String>,
+    /// The agent file declares its own MCP servers (`mcp-servers:`).
+    pub declares_mcp: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +171,8 @@ pub struct AgentBundle {
     pub frontmatter: AgentFrontmatter,
     template: Template,
     output_globs: GlobSet,
+    /// Set by [`AgentBundle::restrict_to_platform_policy`]: outputs inside dot-directories never match.
+    restricted: bool,
 }
 
 impl AgentBundle {
@@ -173,7 +188,12 @@ impl AgentBundle {
         ensure!(manifest.schema_version == 1, "bundle.yaml: unsupported schema_version {}", manifest.schema_version);
         ensure!(AGENT_ID_RE.is_match(&manifest.agent.id), "bundle.yaml: invalid agent.id {:?}", manifest.agent.id);
 
-        let agent_file = dir.join(AGENTS_DIR).join(format!("{}.agent.md", manifest.agent.id));
+        let agents_rel = manifest.agents_dir.as_deref().map(|d| d.trim_end_matches('/')).unwrap_or(AGENTS_DIR);
+        ensure!(
+            agents_rel == "." || validate::relative_path(agents_rel).is_ok(),
+            "bundle.yaml: agents_dir {agents_rel:?} must be '.' or a relative path inside the bundle"
+        );
+        let agent_file = dir.join(agents_rel).join(format!("{}.agent.md", manifest.agent.id));
         let agent_text = std::fs::read_to_string(&agent_file).with_context(|| {
             format!(
                 "agent.id is {:?} but {} does not exist (the id must equal the agent file name without .agent.md)",
@@ -274,7 +294,16 @@ impl AgentBundle {
         }
 
         let version = hash_dir(dir)?;
-        Ok(Self { dir: dir.to_owned(), manifest, version, agent_file, frontmatter, template, output_globs })
+        Ok(Self {
+            dir: dir.to_owned(),
+            manifest,
+            version,
+            agent_file,
+            frontmatter,
+            template,
+            output_globs,
+            restricted: false,
+        })
     }
 
     pub fn id(&self) -> &str {
@@ -312,11 +341,60 @@ impl AgentBundle {
     }
 
     pub fn matches_output(&self, path: &str) -> bool {
+        if self.restricted && path.split('/').any(|c| c.starts_with('.')) {
+            return false;
+        }
         self.output_globs.is_match(path)
     }
 
     pub fn agents_dir(&self) -> PathBuf {
-        self.dir.join(AGENTS_DIR)
+        let rel = self.manifest.agents_dir.as_deref().map(|d| d.trim_end_matches('/')).unwrap_or(AGENTS_DIR);
+        self.dir.join(rel)
+    }
+
+    /// Clamps a bundle fetched from a repository to the platform's hard limits, whatever `bundle.yaml` or the
+    /// agent file ask for: never shell/url/memory tools, no MCP servers, no repository instructions, and only
+    /// documentation files (see [`SAFE_OUTPUT_EXTENSIONS`]) below a `docs` directory may be written back.
+    /// Returns human-readable notes about anything that was tightened; fails when the bundle cannot be made
+    /// safe (it asks for MCP servers or for outputs outside documentation).
+    pub fn restrict_to_platform_policy(&mut self) -> Result<Vec<String>, AppError> {
+        let invalid = |msg: String| AppError::new(bcp_core::ErrorCode::GeneratorInvalid, msg);
+        let mut notes = Vec::new();
+        if self.manifest.runtime.mcp_config.is_some() {
+            return Err(invalid(
+                "Generators from repositories cannot configure MCP servers (runtime.mcp_config).".into(),
+            ));
+        }
+        if self.frontmatter.declares_mcp {
+            return Err(invalid(
+                "The agent file declares MCP servers, which generators from repositories cannot use.".into(),
+            ));
+        }
+        for p in &self.manifest.output.paths {
+            if let Err(why) = check_output_glob(p) {
+                return Err(invalid(format!(
+                    "Output path {p:?} is not allowed for generators from repositories: {why}. \
+                     Outputs must be documentation files (md, mdx, txt, yaml, yml, json) below a 'docs' directory."
+                )));
+            }
+        }
+        let rt = &mut self.manifest.runtime;
+        let before = rt.allow_tools.len();
+        rt.allow_tools.retain(|t| SAFE_ALLOW_TOOLS.contains(&t.trim().to_ascii_lowercase().as_str()));
+        if rt.allow_tools.len() != before {
+            notes.push("Removed tool permissions other than read/write/edit/search".to_owned());
+        }
+        for t in HARD_DENY_TOOLS {
+            if !rt.deny_tools.iter().any(|d| d.eq_ignore_ascii_case(t)) {
+                rt.deny_tools.push((*t).to_owned());
+            }
+        }
+        if rt.repository_instructions {
+            rt.repository_instructions = false;
+            notes.push("Disabled repository custom instructions".to_owned());
+        }
+        self.restricted = true;
+        Ok(notes)
     }
 
     /// Validates user-supplied inputs against the manifest and fills defaults. Unknown names are rejected.
@@ -395,6 +473,24 @@ impl AgentBundle {
     }
 }
 
+/// A restricted output glob must be `<literal or ** components>/docs/.../<file>.<safe ext>` with no dot
+/// components, so a bundle cannot target workflows, manifests or source files.
+fn check_output_glob(glob: &str) -> Result<(), &'static str> {
+    let parts: Vec<&str> = glob.split('/').collect();
+    let (file, dirs) = parts.split_last().ok_or("empty path")?;
+    if parts.iter().any(|c| c.starts_with('.')) {
+        return Err("it points into a dot-directory or dot-file");
+    }
+    let ext = file.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    if !SAFE_OUTPUT_EXTENSIONS.contains(&ext.as_str()) {
+        return Err("only documentation file types are allowed");
+    }
+    if !dirs.iter().any(|c| c.eq_ignore_ascii_case("docs")) {
+        return Err("it is not below a 'docs' directory");
+    }
+    Ok(())
+}
+
 /// Extracts `name`, `description` and `model` from the leading `---` YAML block, if any.
 pub fn parse_frontmatter(text: &str) -> Result<AgentFrontmatter> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -411,7 +507,8 @@ pub fn parse_frontmatter(text: &str) -> Result<AgentFrontmatter> {
         Some(serde_yaml::Value::Sequence(items)) => items.iter().find_map(|v| v.as_str()).map(|s| s.trim().to_owned()),
         _ => None,
     };
-    Ok(AgentFrontmatter { name: str_field("name"), description: str_field("description"), model })
+    let declares_mcp = yaml.get("mcp-servers").is_some() || yaml.get("mcp_servers").is_some();
+    Ok(AgentFrontmatter { name: str_field("name"), description: str_field("description"), model, declares_mcp })
 }
 
 /// Lists bundle files (relative path, absolute path), skipping dot entries such as Kubernetes ConfigMap
@@ -548,8 +645,78 @@ runtime:
     fn repository_bundle_is_valid() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../agent-bundle");
         if dir.exists() {
-            let b = AgentBundle::load(&dir).unwrap();
-            assert!(b.manifest.placeholder, "update this test when the real agent is installed");
+            AgentBundle::load(&dir).unwrap();
         }
+    }
+
+    const UNTRUSTED: &str = r#"
+schema_version: 1
+agents_dir: "."
+agent: { id: bc }
+prompt:
+  template: "Document {{repo}}."
+output:
+  paths: ["docs/*.md", "**/docs/ctx/*.yaml"]
+runtime:
+  allow_tools: [read, write, shell, "shell(git push)"]
+  deny_tools: [url]
+  repository_instructions: true
+"#;
+
+    fn untrusted(manifest: &str, agent: &str) -> Result<(AgentBundle, Vec<String>), AppError> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(MANIFEST_FILE), manifest).unwrap();
+        std::fs::write(dir.path().join("bc.agent.md"), agent).unwrap();
+        let mut b = AgentBundle::load(dir.path()).unwrap();
+        let notes = b.restrict_to_platform_policy()?;
+        Ok((b, notes))
+    }
+
+    #[test]
+    fn agents_dir_dot_keeps_manifest_beside_agent_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(MANIFEST_FILE), UNTRUSTED).unwrap();
+        std::fs::write(dir.path().join("bc.agent.md"), "# a\n").unwrap();
+        let b = AgentBundle::load(dir.path()).unwrap();
+        assert_eq!(b.agent_file, dir.path().join("./bc.agent.md"));
+        assert_eq!(b.agents_dir(), dir.path().join("."));
+        assert!(AgentBundle::load(dir.path()).unwrap().version.len() == 12);
+    }
+
+    #[test]
+    fn platform_policy_clamps_tools_and_outputs() {
+        let (b, notes) = untrusted(UNTRUSTED, "# a\n").unwrap();
+        assert_eq!(b.manifest.runtime.allow_tools, vec!["read".to_owned(), "write".to_owned()]);
+        for t in HARD_DENY_TOOLS {
+            assert!(b.manifest.runtime.deny_tools.iter().any(|d| d == t), "{t} must be denied");
+        }
+        assert!(!b.manifest.runtime.repository_instructions);
+        assert_eq!(notes.len(), 2);
+        assert!(b.matches_output("docs/a.md"));
+        assert!(b.matches_output("svc/docs/ctx/x.yaml"));
+        // Dot directories never match once restricted, even through `**`.
+        assert!(!b.matches_output(".hidden/docs/ctx/x.yaml"));
+    }
+
+    #[test]
+    fn platform_policy_rejects_unsafe_bundles() {
+        for (m, a) in [
+            (
+                UNTRUSTED
+                    .replace("paths: [\"docs/*.md\", \"**/docs/ctx/*.yaml\"]", "paths: [\".github/workflows/x.yml\"]"),
+                "# a\n",
+            ),
+            (UNTRUSTED.replace("\"docs/*.md\"", "\"src/*.md\""), "# a\n"),
+            (UNTRUSTED.replace("\"docs/*.md\"", "\"docs/*.sh\""), "# a\n"),
+            (UNTRUSTED.replace("\"docs/*.md\"", "\"docs/package.toml\""), "# a\n"),
+            (UNTRUSTED.to_owned(), "---\nmcp-servers:\n  x: { command: evil }\n---\n# a\n"),
+        ] {
+            let err = untrusted(&m, a).map(|_| ()).unwrap_err();
+            assert_eq!(err.code, bcp_core::ErrorCode::GeneratorInvalid, "{m}");
+        }
+        // The built-in bundle is not restricted: unrestricted matching is unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        write_bundle(dir.path(), MANIFEST, "# a\n");
+        assert!(AgentBundle::load(dir.path()).unwrap().matches_output("docs/contexts/orders.md"));
     }
 }

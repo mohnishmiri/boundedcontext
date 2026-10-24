@@ -22,6 +22,8 @@ pub enum ErrorCode {
     AppNotInstalled,
     ModelUnavailable,
     ModelLockedByAgent,
+    GeneratorNotAllowed,
+    GeneratorInvalid,
     CopilotUnauthorized,
     AgentFailed,
     AgentTimeout,
@@ -56,6 +58,8 @@ impl ErrorCode {
             Self::AppNotInstalled => "app_not_installed",
             Self::ModelUnavailable => "model_unavailable",
             Self::ModelLockedByAgent => "model_locked_by_agent",
+            Self::GeneratorNotAllowed => "generator_not_allowed",
+            Self::GeneratorInvalid => "generator_invalid",
             Self::CopilotUnauthorized => "copilot_unauthorized",
             Self::AgentFailed => "agent_failed",
             Self::AgentTimeout => "agent_timeout",
@@ -80,7 +84,11 @@ impl ErrorCode {
         match self {
             Self::ValidationFailed => 400,
             Self::Unauthenticated | Self::GithubAuthExpired => 401,
-            Self::Forbidden | Self::CsrfRejected | Self::RepositoryAccessDenied | Self::CopilotUnauthorized => 403,
+            Self::Forbidden
+            | Self::CsrfRejected
+            | Self::RepositoryAccessDenied
+            | Self::GeneratorNotAllowed
+            | Self::CopilotUnauthorized => 403,
             Self::NotFound | Self::AppNotInstalled => 404,
             Self::DuplicateJob
             | Self::Conflict
@@ -89,7 +97,11 @@ impl ErrorCode {
             | Self::BranchConflict
             | Self::Cancelled => 409,
             Self::PayloadTooLarge | Self::RepositoryTooLarge | Self::OutputTooLarge => 413,
-            Self::ModelUnavailable | Self::OutputMissing | Self::OutputEmpty | Self::OutputInvalid => 422,
+            Self::ModelUnavailable
+            | Self::GeneratorInvalid
+            | Self::OutputMissing
+            | Self::OutputEmpty
+            | Self::OutputInvalid => 422,
             Self::RateLimited | Self::GithubRateLimited => 429,
             Self::GithubUnavailable => 502,
             Self::AgentUnavailable | Self::AgentFailed | Self::AgentTimeout => 503,

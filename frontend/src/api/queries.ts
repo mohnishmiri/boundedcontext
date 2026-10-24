@@ -1,12 +1,14 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query';
 
 import * as api from './client';
+import { isTerminalStatus } from '../lib/jobState';
 import type { JobStatus } from './types';
 
 export const queryKeys = {
   me: ['auth', 'me'] as const,
   authNotice: ['auth', 'notice'] as const,
-  agent: ['agent'] as const,
+  generators: ['generators'] as const,
+  generatorAgent: (id: string) => ['generators', 'agent', id] as const,
   models: ['models'] as const,
   organizations: ['github', 'organizations'] as const,
   repositories: (owner: string, q: string, page: number) => ['github', 'repositories', owner, q, page] as const,
@@ -15,6 +17,7 @@ export const queryKeys = {
     ['github', 'branches', owner, repo, q, page] as const,
   jobs: ['jobs'] as const,
   jobList: (status: JobStatus | undefined, page: number) => ['jobs', 'list', status ?? 'all', page] as const,
+  batchJobs: (batchId: string) => ['jobs', 'batch', batchId] as const,
   job: (id: string) => ['jobs', 'detail', id] as const,
   jobDiff: (id: string) => ['jobs', 'diff', id] as const,
 };
@@ -27,12 +30,20 @@ export function useMe() {
   });
 }
 
-export function useAgent(enabled = true) {
+export function useGenerators() {
   return useQuery({
-    queryKey: queryKeys.agent,
-    queryFn: ({ signal }) => api.getAgent(signal),
+    queryKey: queryKeys.generators,
+    queryFn: ({ signal }) => api.listGenerators(signal),
+    staleTime: 60_000,
+  });
+}
+
+export function useGeneratorAgent(generatorId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.generatorAgent(generatorId ?? ''),
+    queryFn: ({ signal }) => api.getGeneratorAgent(generatorId ?? '', signal),
+    enabled: Boolean(generatorId),
     staleTime: 5 * 60_000,
-    enabled,
   });
 }
 
@@ -75,6 +86,17 @@ export function useRepository(owner: string | null, repo: string | null) {
   });
 }
 
+/** Access details for several repositories at once; shares cache entries with `useRepository`. */
+export function useRepositoryDetails(repos: { owner: string; repo: string }[]) {
+  return useQueries({
+    queries: repos.map((r) => ({
+      queryKey: queryKeys.repository(r.owner, r.repo),
+      queryFn: ({ signal }: { signal: AbortSignal }) => api.getRepository(r.owner, r.repo, signal),
+      staleTime: 60_000,
+    })),
+  });
+}
+
 export function useBranches(owner: string | null, repo: string | null, q: string, page: number) {
   return useQuery({
     queryKey: queryKeys.branches(owner ?? '', repo ?? '', q, page),
@@ -109,5 +131,21 @@ export function useJobDiff(id: string, enabled: boolean) {
     queryFn: ({ signal }) => api.getJobDiff(id, signal),
     enabled,
     staleTime: Infinity,
+  });
+}
+
+export const BATCH_JOBS_PER_PAGE = 100;
+export const BATCH_POLL_MS = 3_000;
+
+/** The jobs of one batch, polled until every job has reached a terminal status. */
+export function useBatchJobs(batchId: string) {
+  return useQuery({
+    queryKey: queryKeys.batchJobs(batchId),
+    queryFn: ({ signal }) => api.listJobs({ batch_id: batchId, per_page: BATCH_JOBS_PER_PAGE }, signal),
+    refetchInterval: (query) => {
+      const items = query.state.data?.items;
+      if (!items) return false;
+      return items.some((j) => !isTerminalStatus(j.status)) ? BATCH_POLL_MS : false;
+    },
   });
 }

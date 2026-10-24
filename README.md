@@ -5,11 +5,16 @@ developers use in VS Code) against any GitHub repository they can access, shows 
 review, and opens a pull request — without anyone cloning the repository or opening VS Code.
 
 ```
-Sign in with GitHub → pick organisation, repository, branch, model → generate → review preview + diff → open PR
+Sign in with GitHub → pick a generator, organisation, one or more repositories (+ branch each) and a model → generate → review preview + diff → open PRs
 ```
 
+- **Generic platform**: the *generator* (agent bundle) is selectable — the built-in one, operator-curated
+  generator repositories, or a repository the user adds (if the operator allows it) — and a request can cover
+  **many repositories** at once (`config/generators.yaml`, `docs/architecture.md`).
 - **Reuses the real agent**: the agent files are run verbatim through **GitHub Copilot CLI** in non-interactive
   mode; nothing about the agent is re-implemented (`agent-bundle/`).
+- **Models follow your token**: the model list comes from the signed-in user's own Copilot entitlement, with the
+  operator catalog as a labelled fallback.
 - **Each user's own Copilot entitlement**: runs use the signed-in user's GitHub App user token, so model access
   and policies are exactly what that user has in VS Code.
 - **Least privilege**: users see only repositories they can access *and* where the GitHub App is installed;
@@ -40,7 +45,8 @@ Runs PostgreSQL, a mock GitHub, the API, a worker using a fake Copilot CLI, and 
 | `backend/` | Rust workspace: `bcp-api` (Axum), `bcp-worker`, `bcp-agent` (bundle + Copilot CLI adapter + `bcp-agent-run`), `bcp-github`, `bcp-store` (SQLx + migrations), `bcp-core`, `bcp-services`; dev tools `mock-github`, `fake-copilot`, `integration-tests` |
 | `frontend/` | React + TypeScript SPA (Vite, Tailwind, React Query), nginx image |
 | `agent-bundle/` | The agent files (verbatim) and `bundle.yaml` (prompt, output paths, inputs, tool policy) |
-| `config/models.yaml` | Operator-maintained model catalog |
+| `config/models.yaml` | Operator-maintained model catalog (fallback for the live per-user list) |
+| `config/generators.yaml` | Generator registry: curated generator repositories and the allowlist for user-added ones |
 | `deploy/helm/` | Helm chart for AKS (Key Vault CSI, Workload Identity, KEDA, NetworkPolicies, app routing) |
 | `deploy/observability/` | Prometheus alert rules |
 | `docs/` | Design and operations documentation |

@@ -7,7 +7,6 @@ import { queryKeys } from '../api/queries';
 import type { User } from '../api/types';
 import { safeExternalUrl } from '../lib/format';
 import { Button } from './Button';
-import { PlaceholderBanner } from './PlaceholderBanner';
 
 const navClass = ({ isActive }: { isActive: boolean }) =>
   `rounded-md px-3 py-2 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 ${
@@ -64,7 +63,6 @@ export function Layout({ user, children }: { user: User; children: ReactNode }) 
           </div>
         </div>
       </header>
-      <PlaceholderBanner />
       <main id="main" className="mx-auto max-w-6xl px-4 py-6" tabIndex={-1}>
         {children}
       </main>

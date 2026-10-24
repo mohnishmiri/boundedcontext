@@ -9,6 +9,7 @@ import { ErrorPanel } from './components/ErrorPanel';
 import { Layout } from './components/Layout';
 import { PageSpinner } from './components/Spinner';
 import { SignInPage } from './features/auth/SignInPage';
+import { BatchPage } from './features/batch/BatchPage';
 import { DashboardPage } from './features/dashboard/DashboardPage';
 import { JobPage } from './features/job/JobPage';
 import { NewJobPage } from './features/new-job/NewJobPage';
@@ -64,6 +65,7 @@ export function AppRoutes() {
           <Routes>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/jobs/new" element={<NewJobPage />} />
+            <Route path="/batches/:batchId" element={<BatchPage />} />
             <Route path="/jobs/:jobId" element={<JobPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Routes>

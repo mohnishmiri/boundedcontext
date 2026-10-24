@@ -17,6 +17,8 @@ export type ErrorCode =
   | 'app_not_installed'
   | 'model_unavailable'
   | 'model_locked_by_agent'
+  | 'generator_not_allowed'
+  | 'generator_invalid'
   | 'copilot_unauthorized'
   | 'agent_failed'
   | 'agent_timeout'
@@ -85,6 +87,7 @@ export type JobSummary = {
   created_at: string;
   finished_at: string | null;
   requested_by: string;
+  batch_id: string | null;
 };
 
 export type OutputChangeType = 'added' | 'modified';
@@ -109,10 +112,25 @@ export type JobPublish = {
   updated_at: string | null;
 };
 
+export type GeneratorSource = 'builtin' | 'curated' | 'user';
+
+/** The generator a job ran with, as recorded on the job (may point at a since-removed generator). */
+export type JobGenerator = {
+  id: string | null;
+  name: string;
+  source: GeneratorSource;
+  owner: string | null;
+  repo: string | null;
+  branch: string | null;
+  path: string | null;
+  sha: string | null;
+};
+
 export type Job = JobSummary & {
   repository_url: string;
   base_sha: string | null;
   agent: { id: string; version: string; placeholder: boolean };
+  generator: JobGenerator | null;
   inputs: Record<string, string>;
   steps: Step[];
   error: JobError | null;
@@ -188,6 +206,32 @@ export type AgentInfo = {
   inputs: AgentInput[];
 };
 
+export type Generator = {
+  id: string;
+  name: string;
+  description: string | null;
+  source: GeneratorSource;
+  repository: { owner: string; repo: string; branch: string | null; path: string } | null;
+  removable: boolean;
+};
+
+export type GeneratorList = { items: Generator[]; default_id: string };
+
+export type CreateGeneratorRequest = {
+  owner: string;
+  repo: string;
+  branch?: string;
+  path?: string;
+  name?: string;
+};
+
+/** `GET /api/generators/{id}/agent`: the agent info plus the generator's model pin and resolved revision. */
+export type GeneratorAgentInfo = AgentInfo & {
+  locked_model: string | null;
+  lock_reason: string | null;
+  resolved: { branch: string | null; sha: string | null };
+};
+
 export type Model = {
   id: string;
   name: string;
@@ -200,8 +244,9 @@ export type Model = {
 export type ModelList = {
   items: Model[];
   default_model: string;
-  locked_model: string | null;
-  lock_reason: string | null;
+  /** `copilot`: the models the signed-in user can use; `catalog`: a static fallback list. */
+  source: 'copilot' | 'catalog';
+  warning: string | null;
   entitlement_note: string;
 };
 
@@ -211,7 +256,23 @@ export type CreateJobRequest = {
   base_branch: string;
   model: string;
   inputs?: Record<string, string>;
+  generator_id?: string;
 };
+
+export type BatchRepository = { owner: string; repo: string; base_branch: string };
+
+export type CreateBatchRequest = {
+  generator_id: string;
+  model: string;
+  inputs: Record<string, string>;
+  repositories: BatchRepository[];
+};
+
+export type BatchFailure = BatchRepository & {
+  error: { code: ErrorCode; message: string; details?: unknown };
+};
+
+export type BatchResponse = { batch_id: string; jobs: JobSummary[]; failures: BatchFailure[] };
 
 export type DiffFile = {
   path: string;

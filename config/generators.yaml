@@ -1,0 +1,34 @@
+# Generator registry — operator maintained. Served by GET /api/generators and enforced server-side.
+#
+# A generator is an agent bundle (bundle.yaml + agents/, see agent-bundle/README.md) that produces the
+# documentation. The built-in generator is the bundle baked into the worker image (agent-bundle/). Everything
+# else is fetched from a GitHub repository at job time, pinned to the commit that was current when the job was
+# created, using the requesting user's token (so the user — and, in GitHub App mode, the portal's App — must be
+# able to read that repository).
+#
+# Generators fetched from repositories always run under the portal's hard limits, whatever their bundle.yaml
+# asks for: no shell/url/memory tools, no MCP servers, no repository instructions, and only documentation files
+# (md, mdx, txt, yaml, yml, json) outside dot-directories can be written to the pull request.
+
+# builtin:                     # optional display overrides for the built-in generator
+#   name: Standard generator
+#   description: Bounded-context documentation using the portal's bundled agent.
+
+# Curated generators: always listed for every user. `path` is the directory holding bundle.yaml. Example:
+#
+# curated:
+#   - id: aifc-archetype
+#     name: AIFC Archetype & Bounded Context Orchestrator
+#     description: Generates a FULL or LEAN AIFC archetype pack plus the 9-section Bounded Context document.
+#     owner: mohnishmiri
+#     repo: bounded-context-generator
+#     path: aifc-archetype-generator      # must contain bundle.yaml (agents_dir: "." if the agent files sit beside it)
+curated: []
+
+# Repositories users may add as their own generators (owner/repo, or owner/* for every repository of an
+# owner; case-insensitive). Leave empty to disable user-added generators.
+allow:
+  - mohnishmiri/*
+
+# Most generator repositories one user can save.
+max_user_generators: 20

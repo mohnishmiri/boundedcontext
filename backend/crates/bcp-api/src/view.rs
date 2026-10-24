@@ -49,7 +49,19 @@ pub fn summary(job: &JobRow) -> Value {
         "created_at": job.created_at,
         "finished_at": job.finished_at,
         "requested_by": job.requested_by,
+        "batch_id": job.batch_id,
     })
+}
+
+fn generator_json(job: &JobRow) -> Value {
+    match &job.generator_name {
+        Some(name) => json!({
+            "id": job.generator_id, "name": name, "source": job.generator_source,
+            "owner": job.generator_owner, "repo": job.generator_repo, "branch": job.generator_branch,
+            "path": job.generator_path, "sha": job.generator_sha,
+        }),
+        None => Value::Null,
+    }
 }
 
 pub fn can_publish(job: &JobRow, artifacts: &[ArtifactRow]) -> bool {
@@ -107,6 +119,7 @@ pub fn job(job: &JobRow, artifacts: &[ArtifactRow], web_url: &str) -> Value {
     v["base_sha"] = json!(job.base_sha);
     v["agent"] = json!({ "id": job.agent_id, "version": job.agent_version, "placeholder": job.agent_placeholder });
     v["inputs"] = job.inputs.clone();
+    v["generator"] = generator_json(job);
     v["steps"] = json!(steps);
     v["error"] = error_json(&job.error_code, &job.error_message, job.error_retryable);
     v["cancel_requested"] = json!(job.cancel_requested);

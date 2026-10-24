@@ -158,6 +158,11 @@ array:
   configMap:
     name: {{ include "bcp.fullname" . }}-models
 {{- end }}
+{{- if .Values.generators.content }}
+- name: generators
+  configMap:
+    name: {{ include "bcp.fullname" . }}-generators
+{{- end }}
 {{- if .Values.agentBundle.configMap }}
 - name: agent-bundle
   configMap:
@@ -176,6 +181,12 @@ array:
   subPath: models.yaml
   readOnly: true
 {{- end }}
+{{- if .Values.generators.content }}
+- name: generators
+  mountPath: {{ .Values.config.generatorsFile }}
+  subPath: generators.yaml
+  readOnly: true
+{{- end }}
 {{- if .Values.agentBundle.configMap }}
 - name: agent-bundle
   mountPath: {{ .Values.config.agentBundleDir }}
@@ -186,6 +197,7 @@ array:
 {{/* Checksum annotations shared by api and worker so config changes roll both. */}}
 {{- define "bcp.sharedChecksums" -}}
 checksum/models: {{ .Values.models.content | sha256sum | trunc 16 }}
+checksum/generators: {{ .Values.generators.content | sha256sum | trunc 16 }}
 checksum/agent-bundle: {{ printf "%s/%s/%s" .Values.agentBundle.configMap (toJson .Values.agentBundle.items) .Values.agentBundle.checksum | sha256sum | trunc 16 }}
 checksum/secrets: {{ toJson .Values.secrets | sha256sum | trunc 16 }}
 {{- end -}}

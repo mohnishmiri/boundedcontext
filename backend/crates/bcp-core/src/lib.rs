@@ -4,6 +4,7 @@ pub mod config;
 pub mod crypto;
 pub mod domain;
 pub mod error;
+pub mod generators;
 pub mod models;
 pub mod redact;
 pub mod steps;

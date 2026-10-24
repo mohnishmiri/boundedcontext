@@ -87,6 +87,23 @@ the agent may be fully manipulated and limits what that can achieve:
 The residual risk is that a manipulated agent writes misleading documentation into the allowlisted file. That is
 mitigated by the review screen (rendered preview and diff) and by pull-request review.
 
+### Generators from repositories
+
+A generator repository decides the agent's prompt, tool permissions and output paths, so a user-supplied one is
+effectively user-supplied configuration for the sandbox above. Controls:
+
+| Control | Enforcement |
+|---|---|
+| Only repositories on the operator allowlist (or curated) can be used; re-checked on every use | `config/generators.yaml` → `GeneratorRegistry::ensure_allowed` |
+| The user's own token fetches the generator, so a user can only use generators they can read | `GeneratorResolver` |
+| Hard tool caps whatever `bundle.yaml` says: only read/write/edit/search allowed; shell, url, memory always denied; repository instructions off | `AgentBundle::restrict_to_platform_policy` |
+| Bundles that configure MCP servers (`runtime.mcp_config` or `mcp-servers:` in the agent file) are rejected | same |
+| Outputs limited to documentation files (md, mdx, txt, yaml, yml, json) below a `docs` directory and never inside dot-directories, so a generator cannot write workflows, manifests or source | same + `matches_output` |
+| The job pins the generator commit; the worker runs exactly that revision | `jobs.generator_sha` |
+| Generator archives are size/file capped and extracted with the same safe extractor as repositories | `GeneratorResolver` (50 MiB / 5000 files) |
+
+The built-in generator ships in the worker image and is not clamped, because the operator controls it.
+
 ### Safe repository extraction
 
 GitHub tarballs are extracted by our own code (`workspace::extract_tarball`): absolute paths, `..`, `.git/`,

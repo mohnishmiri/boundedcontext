@@ -13,6 +13,7 @@ import { linkClass } from '../../lib/styles';
 
 function regenerateLink(job: Job): string {
   const p = new URLSearchParams({ owner: job.owner, repo: job.repo, branch: job.base_branch, model: job.model });
+  if (job.generator?.id) p.set('generator', job.generator.id);
   return `/jobs/new?${p.toString()}`;
 }
 

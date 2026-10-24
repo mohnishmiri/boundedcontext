@@ -104,6 +104,18 @@ Test layers:
 | `tools/integration-tests` | API + worker + PostgreSQL + mock GitHub end to end (OAuth, CSRF, browsing, generate, review, publish, conflicts, cancellation, SSE) |
 | `frontend/src/**/*.test.tsx` | UI flows with MSW |
 
+## Generators, batches and models locally
+
+- The mock GitHub seeds generator repositories under `genhub/` (`lite`, `monorepo` with a bundle in
+  `generators/ctx`, plus invalid ones) that `octocat` can read. They are not installed on any App, so they never
+  show in the repository picker. The default `config/generators.yaml` allows `mohnishmiri/*` only; to try
+  user-added generators against the mock, add `genhub/*` to `allow:` (or mount your own file) and restart the API.
+- The model list is catalog-only unless the API is pointed at a Copilot API. With the mock set
+  `BCP_COPILOT_API_URL=http://mock-github:9000/copilot` to get the live, per-user path (octocat and viewer see
+  different lists). Against real github.com the default is `https://api.githubcopilot.com`.
+- The integration tests use a fixture bundle (`backend/tools/integration-tests/fixtures/bundle`) and their own
+  generator registry, so they do not depend on `agent-bundle/` or `config/generators.yaml`.
+
 ## Running against real GitHub and Copilot
 
 1. Register a personal **development GitHub App** (see `docs/azure-setup.md` §6) with callback

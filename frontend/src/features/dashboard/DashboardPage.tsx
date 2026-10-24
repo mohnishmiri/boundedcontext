@@ -103,6 +103,15 @@ export function DashboardPage() {
                           {job.owner}/{job.repo}
                         </Link>
                         <span className="ml-2 font-mono text-xs text-gray-500">{job.short_id}</span>
+                        {job.batch_id && (
+                          <Link
+                            to={`/batches/${encodeURIComponent(job.batch_id)}`}
+                            className={`${linkClass} ml-2 text-xs`}
+                            aria-label={`Batch of ${job.owner}/${job.repo}`}
+                          >
+                            Batch
+                          </Link>
+                        )}
                       </td>
                       <td className="py-3 pr-4 font-mono text-xs">{job.base_branch}</td>
                       <td className="py-3 pr-4 text-xs">{job.model}</td>

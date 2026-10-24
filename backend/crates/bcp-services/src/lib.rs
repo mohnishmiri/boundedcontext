@@ -1,5 +1,7 @@
 //! Services shared by the API and the worker.
 
+pub mod generators;
+
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 

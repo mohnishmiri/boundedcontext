@@ -125,12 +125,19 @@ impl Worker {
             Ok(Some(u)) => (u.login, u.github_id),
             _ => (job.requested_by.clone(), 0),
         };
+        // The output allowlist recorded when the job was created (jobs from before it was recorded rely on the
+        // `allowed` flag set when their output was validated).
+        let allowlist = output_allowlist(&job.output_globs());
         let files: Vec<TreeFile> = store
             .list_artifacts(job.id)
             .await
             .map_err(|e| Outcome::Failed(e.into()))?
             .into_iter()
-            .filter(|a| a.allowed && validate::relative_path(&a.path).is_ok() && self.bundle.matches_output(&a.path))
+            .filter(|a| {
+                a.allowed
+                    && validate::relative_path(&a.path).is_ok()
+                    && allowlist.as_ref().is_none_or(|g| g.is_match(&a.path))
+            })
             .filter_map(|a| a.new_content.map(|content| TreeFile { path: a.path, content }))
             .collect();
         if files.is_empty() {
@@ -140,20 +147,24 @@ impl Worker {
         }
         let base_sha =
             job.base_sha.clone().ok_or_else(|| Outcome::Failed(AppError::internal("job has no analysed commit")))?;
-        let installation = match job.installation_id {
-            Some(i) => i,
-            None => {
-                guard(ctl, async { gh.get_repository_installation(owner, repo).await.map(|i| i.id).map_err(svc) })
-                    .await?
-            }
+        let token = if gh.has_app() {
+            let installation = match job.installation_id {
+                Some(i) => i,
+                None => {
+                    guard(ctl, async { gh.get_repository_installation(owner, repo).await.map(|i| i.id).map_err(svc) })
+                        .await?
+                }
+            };
+            guard(ctl, async {
+                gh.create_installation_token(installation, repo, &[("contents", "write"), ("pull_requests", "write")])
+                    .await
+                    .map_err(svc)
+            })
+            .await?
+            .token
+        } else {
+            user_token.clone()
         };
-        let token = guard(ctl, async {
-            gh.create_installation_token(installation, repo, &[("contents", "write"), ("pull_requests", "write")])
-                .await
-                .map_err(svc)
-        })
-        .await?
-        .token;
 
         // Always re-checked, even when a commit exists from an earlier attempt: the base may have moved since.
         {
@@ -386,6 +397,23 @@ impl Worker {
             job.base_branch, job.agent_id, job.agent_version, job.model, job.id,
         )
     }
+}
+
+fn output_allowlist(globs: &[String]) -> Option<globset::GlobSet> {
+    if globs.is_empty() {
+        return None;
+    }
+    let mut b = globset::GlobSetBuilder::new();
+    for g in globs {
+        match globset::Glob::new(g) {
+            Ok(glob) => {
+                b.add(glob);
+            }
+            // Fail closed: an allowlist that cannot be read matches nothing.
+            Err(_) => return Some(globset::GlobSet::empty()),
+        }
+    }
+    Some(b.build().unwrap_or_else(|_| globset::GlobSet::empty()))
 }
 
 #[cfg(test)]

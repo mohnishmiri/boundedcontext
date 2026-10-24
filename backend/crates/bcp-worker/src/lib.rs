@@ -23,6 +23,7 @@ use bcp_agent::{AgentAdapter, AgentBundle, CopilotCliAdapter};
 use bcp_core::domain::TaskKind;
 use bcp_core::{AppError, ErrorCode};
 use bcp_github::GitHubClient;
+use bcp_services::generators::GeneratorResolver;
 use bcp_services::TokenService;
 use bcp_store::{Store, TaskRow, TASKS_CHANNEL};
 use rand::Rng;
@@ -126,13 +127,20 @@ pub(crate) fn retry_delay(attempt: i32, retry_after: Option<u64>) -> Duration {
     Duration::from_secs(base + rand::thread_rng().gen_range(0..=base / 5))
 }
 
+/// Builds the agent runtime for a bundle. Each job runs the generator it was created with, so the worker
+/// needs an adapter per bundle rather than one global adapter.
+pub type AdapterFactory = Arc<dyn Fn(Arc<AgentBundle>) -> Arc<dyn AgentAdapter> + Send + Sync>;
+
 pub struct Worker {
     pub(crate) cfg: WorkerConfig,
     pub(crate) store: Store,
     pub(crate) github: GitHubClient,
     pub(crate) tokens: TokenService,
+    /// The built-in generator (the bundle baked into the image); also used for the runtime preflight.
     pub(crate) bundle: Arc<AgentBundle>,
     pub(crate) adapter: Arc<dyn AgentAdapter>,
+    pub(crate) adapters: AdapterFactory,
+    pub(crate) resolver: GeneratorResolver,
     runtime_ready: AtomicBool,
 }
 
@@ -142,10 +150,12 @@ impl Worker {
         store: Store,
         github: GitHubClient,
         bundle: Arc<AgentBundle>,
-        adapter: Arc<dyn AgentAdapter>,
+        adapters: AdapterFactory,
     ) -> Self {
         let tokens = TokenService::new(store.clone(), github.clone(), cfg.common.cipher.clone());
-        Self { cfg, store, github, tokens, bundle, adapter, runtime_ready: AtomicBool::new(false) }
+        let adapter = adapters(bundle.clone());
+        let resolver = GeneratorResolver::new(github.clone(), cfg.work_dir.clone());
+        Self { cfg, store, github, tokens, bundle, adapter, adapters, resolver, runtime_ready: AtomicBool::new(false) }
     }
 
     /// Builds a worker from configuration with the Copilot CLI adapter.
@@ -161,8 +171,9 @@ impl Worker {
         if bundle.manifest.placeholder {
             tracing::warn!("the agent bundle is a PLACEHOLDER — install the real agent (agent-bundle/README.md)");
         }
-        let adapter: Arc<dyn AgentAdapter> = Arc::new(CopilotCliAdapter::new(bundle.clone(), cfg.copilot_bin.clone()));
-        Ok(Arc::new(Self::new(cfg, store, github, bundle, adapter)))
+        let bin = cfg.copilot_bin.clone();
+        let adapters: AdapterFactory = Arc::new(move |b| Arc::new(CopilotCliAdapter::new(b, bin.clone())));
+        Ok(Arc::new(Self::new(cfg, store, github, bundle, adapters)))
     }
 
     pub fn store(&self) -> &Store {

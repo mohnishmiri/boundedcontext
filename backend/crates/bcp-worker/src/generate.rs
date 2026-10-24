@@ -4,14 +4,17 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use bcp_agent::workspace::{capture_base_outputs, collect_outputs, extract_tarball, snapshot, ExtractLimits};
-use bcp_agent::{AgentError, AgentRunRequest, Secret};
+use bcp_agent::{AgentAdapter, AgentBundle, AgentError, AgentRunRequest, Secret};
 use bcp_core::domain::{ChangeType, GenerationStage, JobStatus};
+use bcp_core::generators::GeneratorRepo;
 use bcp_core::redact::Redactor;
 use bcp_core::steps::StageTracker;
 use bcp_core::{AppError, ErrorCode};
 use bcp_github::GitHubError;
+use bcp_services::generators::ResolvedGenerator;
 use bcp_store::{actions, JobRow, NewArtifact, NewAuditEvent, TaskRow};
 use serde_json::json;
+use std::sync::Arc;
 
 use crate::logger::JobLogger;
 use crate::{guard, retry_delay, user_safe, Outcome, RunCtl, Verdict, Worker};
@@ -118,6 +121,7 @@ impl Worker {
 
         // ---- preparing ---------------------------------------------------------------------------------
         let token = guard(ctl, self.tokens.access_token(job.user_id)).await?;
+        let (bundle, adapter, _generator_files) = self.generator_for(job, &token, ctl, log).await?;
         let repo =
             guard(ctl, async { gh.get_repository(&token, &job.owner, &job.repo).await.map_err(|e| e.to_user_error()) })
                 .await?;
@@ -139,16 +143,22 @@ impl Worker {
         })
         .await?;
         let sha = branch.commit.sha;
-        let installation = guard(ctl, async {
-            match gh.get_repository_installation(&job.owner, &job.repo).await {
-                Err(GitHubError::NotFound) => Err(AppError::new(
-                    ErrorCode::AppNotInstalled,
-                    "The portal's GitHub App is no longer installed on this repository.",
-                )),
-                other => other.map(|i| i.id).map_err(|e| e.to_service_error()),
-            }
-        })
-        .await?;
+        let installation = if gh.has_app() {
+            Some(
+                guard(ctl, async {
+                    match gh.get_repository_installation(&job.owner, &job.repo).await {
+                        Err(GitHubError::NotFound) => Err(AppError::new(
+                            ErrorCode::AppNotInstalled,
+                            "The portal's GitHub App is no longer installed on this repository.",
+                        )),
+                        other => other.map(|i| i.id).map_err(|e| e.to_service_error()),
+                    }
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
         guard(ctl, async {
             Ok(store.set_job_source(job.id, &sha, repo.id, installation, repo.permissions().push).await?)
         })
@@ -157,12 +167,18 @@ impl Worker {
 
         // ---- fetching_repository -----------------------------------------------------------------------
         self.enter(job, steps, log, GenerationStage::FetchingRepository).await?;
-        let inst_token = guard(ctl, async {
-            gh.create_installation_token(installation, &job.repo, &[("contents", "read")])
-                .await
-                .map_err(|e| e.to_service_error())
-        })
-        .await?;
+        let fetch_token = match installation {
+            Some(inst_id) => {
+                guard(ctl, async {
+                    gh.create_installation_token(inst_id, &job.repo, &[("contents", "read")])
+                        .await
+                        .map(|t| t.token)
+                        .map_err(|e| e.to_service_error())
+                })
+                .await?
+            }
+            None => token.clone(),
+        };
         tokio::fs::create_dir_all(&self.cfg.work_dir)
             .await
             .map_err(|e| Outcome::Failed(AppError::internal(format!("work dir: {e}"))))?;
@@ -175,12 +191,12 @@ impl Worker {
         let agent_dir = scratch.path().join("agent");
         let fetch_started = Instant::now();
         let bytes = guard(ctl, async {
-            gh.download_tarball(&inst_token.token, &job.owner, &job.repo, &sha, &tgz, self.cfg.max_repo_bytes)
+            gh.download_tarball(&fetch_token, &job.owner, &job.repo, &sha, &tgz, self.cfg.max_repo_bytes)
                 .await
                 .map_err(|e| e.to_service_error())
         })
         .await?;
-        drop(inst_token);
+        drop(fetch_token);
         let limits = ExtractLimits { max_bytes: self.cfg.max_repo_bytes, max_files: self.cfg.max_repo_files };
         let (tgz2, ws2) = (tgz.clone(), workspace.clone());
         let stats = tokio::task::spawn_blocking(move || extract_tarball(&tgz2, &ws2, limits))
@@ -207,10 +223,10 @@ impl Worker {
             return Err(ctl.stop_reason());
         }
         let ws3 = workspace.clone();
-        let bundle = self.bundle.clone();
+        let bundle_for_base = bundle.clone();
         let (before, base) = tokio::task::spawn_blocking(move || {
             let before = snapshot(&ws3)?;
-            let base = capture_base_outputs(&bundle, &ws3, &before);
+            let base = capture_base_outputs(&bundle_for_base, &ws3, &before);
             Ok::<_, std::io::Error>((before, base))
         })
         .await
@@ -223,11 +239,11 @@ impl Worker {
             .map_err(|e| Outcome::Failed(AppError::internal(format!("agent dir: {e}"))))?;
         let inputs: BTreeMap<String, String> = serde_json::from_value(job.inputs.clone()).unwrap_or_default();
         let timeout =
-            std::time::Duration::from_secs(self.bundle.manifest.runtime.timeout_secs).min(self.cfg.max_job_timeout);
+            std::time::Duration::from_secs(bundle.manifest.runtime.timeout_secs).min(self.cfg.max_job_timeout);
         let req = AgentRunRequest {
             workspace: workspace.clone(),
             scratch_dir: agent_dir,
-            model: if self.bundle.locked_model().is_some() { None } else { Some(job.model.clone()) },
+            model: if bundle.locked_model().is_some() { None } else { Some(job.model.clone()) },
             inputs,
             owner: job.owner.clone(),
             repo: job.repo.clone(),
@@ -237,7 +253,7 @@ impl Worker {
             timeout,
         };
         let agent_started = Instant::now();
-        let outcome = self.adapter.run(req, log, ctl.run.clone()).await;
+        let outcome = adapter.run(req, log, ctl.run.clone()).await;
         metrics::histogram!("bcp_agent_run_seconds").record(agent_started.elapsed().as_secs_f64());
         let outcome = match outcome {
             Ok(o) => o,
@@ -251,10 +267,10 @@ impl Worker {
         // ---- validating_output -------------------------------------------------------------------------
         self.enter(job, steps, log, GenerationStage::ValidatingOutput).await?;
         let ws4 = workspace.clone();
-        let bundle = self.bundle.clone();
+        let bundle_for_output = bundle.clone();
         let report = tokio::task::spawn_blocking(move || {
             let after = snapshot(&ws4).map_err(|e| AppError::internal(format!("snapshot: {e}")))?;
-            collect_outputs(&bundle, &ws4, &before, &base, &after)
+            collect_outputs(&bundle_for_output, &ws4, &before, &base, &after)
         })
         .await
         .map_err(blocking_err)?
@@ -304,6 +320,55 @@ impl Worker {
         ))
         .await;
         Ok(())
+    }
+
+    /// The bundle and runtime for this job's generator. Repository generators are downloaded at the exact
+    /// commit pinned when the job was created and re-checked against the platform's hard limits.
+    async fn generator_for(
+        &self,
+        job: &JobRow,
+        token: &str,
+        ctl: &RunCtl,
+        log: &JobLogger,
+    ) -> Result<(Arc<AgentBundle>, Arc<dyn AgentAdapter>, Option<Arc<ResolvedGenerator>>), Outcome> {
+        if job.generator_source == "builtin" {
+            return Ok((self.bundle.clone(), self.adapter.clone(), None));
+        }
+        let (Some(owner), Some(repo), Some(sha)) =
+            (job.generator_owner.clone(), job.generator_repo.clone(), job.generator_sha.clone())
+        else {
+            return Err(Outcome::Failed(
+                AppError::new(ErrorCode::GeneratorInvalid, "The job does not record which generator revision to run.")
+                    .retryable(false),
+            ));
+        };
+        let repo = GeneratorRepo {
+            owner,
+            repo,
+            branch: job.generator_branch.clone(),
+            path: job.generator_path.clone().unwrap_or_default(),
+        };
+        let branch = repo.branch.clone().unwrap_or_default();
+        let resolved = guard(ctl, self.resolver.load(token, &repo, &branch, &sha)).await?;
+        for note in &resolved.notes {
+            log.info(&format!("Generator policy: {note}")).await;
+        }
+        if resolved.bundle.version != job.agent_version {
+            log.warn(&format!(
+                "Generator bundle {} differs from the one validated at request time ({}).",
+                resolved.bundle.version, job.agent_version
+            ))
+            .await;
+        }
+        log.info(&format!(
+            "Using generator {} at {} (bundle {})",
+            repo.display(),
+            &sha[..sha.len().min(12)],
+            resolved.bundle.version
+        ))
+        .await;
+        let adapter = (self.adapters)(resolved.bundle.clone());
+        Ok((resolved.bundle.clone(), adapter, Some(resolved)))
     }
 
     async fn enter(

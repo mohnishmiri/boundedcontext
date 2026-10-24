@@ -36,7 +36,7 @@ flowchart LR
 | Component | Responsibility | Scales on |
 |---|---|---|
 | `frontend` | Static SPA served by unprivileged nginx. No secrets. | HPA (CPU) |
-| `api` | OAuth login, sessions, GitHub browsing on behalf of the user, request validation, authorization, job creation/cancellation, publish requests, SSE progress, audit events. Never runs the agent. | HPA (CPU) |
+| `api` | OAuth login, sessions, GitHub browsing on behalf of the user, generator registry and validation, per-user model listing, request validation, authorization, job/batch creation and cancellation, publish requests, SSE progress, audit events. Never runs the agent. | HPA (CPU) |
 | `worker` | Claims tasks from the Postgres queue, fetches repository snapshots, runs the **agent adapter**, validates output, computes diffs, publishes branch/commit/PR. | KEDA (queue depth) — `Deployment` (loop mode) or `ScaledJob` (one pod per task) |
 | PostgreSQL | Durable state: users, encrypted tokens, sessions, jobs, artifacts, logs, task queue, audit. | — |
 
@@ -44,7 +44,7 @@ The Rust code is a Cargo workspace under `backend/`:
 
 | Crate | Purpose |
 |---|---|
-| `bcp-core` | Domain types, validation of owner/repo/branch/path/model, error codes, config, AES-GCM token crypto, log redaction, model catalog. |
+| `bcp-core` | Domain types, validation of owner/repo/branch/path/model, error codes, config, AES-GCM token crypto, log redaction, model catalog, generator registry (curated list + allowlist). |
 | `bcp-github` | Thin GitHub REST client: App JWT, installation tokens, OAuth code exchange + refresh, repos/branches, tarball, Git Data API, pulls. Retries with backoff; typed errors. |
 | `bcp-agent` | Agent bundle manifest, `AgentAdapter` trait, `CopilotCliAdapter`, workspace snapshot/diff, safe tarball extraction, output validation. Ships `bcp-agent-run` for running the adapter without the web app. |
 | `bcp-store` | SQLx repositories + embedded migrations. |
@@ -53,7 +53,7 @@ The Rust code is a Cargo workspace under `backend/`:
 | `mock-github` | Stateful fake GitHub used by integration tests, the e2e suite and credential-free local development. Not deployed. |
 | `fake-copilot` | Test double for the Copilot CLI used by local development (`.fake-copilot-mode` selects behaviour). Not deployed. |
 | `integration-tests` | End-to-end tests: API + worker + PostgreSQL + mock GitHub + scripted agent runtime. |
-| `bcp-services` | Token service shared by API and worker (decrypt, refresh under a row lock). |
+| `bcp-services` | Token service shared by API and worker (decrypt, refresh under a row lock) and the `GeneratorResolver` (fetch a generator repository at a pinned commit, load and clamp its bundle). |
 
 ## 2. Agent adapter contract
 
@@ -88,6 +88,37 @@ copilot -p <rendered prompt> --agent <bundle agent id> --model <model> -s --no-a
 with a scrubbed environment: `COPILOT_HOME=<scratch>/copilot-home` (contains a verbatim copy of the bundle's
 agent files under `agents/`), `COPILOT_GITHUB_TOKEN=<user token>`, `COPILOT_AUTO_UPDATE=false`, `HOME`,
 `PATH`, `LANG`. The child runs in its own process group so cancellation/timeouts kill the whole tree.
+
+### Generators and batches
+
+The portal is a generic generation platform: *what* produces the documentation is a **generator** — an agent
+bundle (`bundle.yaml` + agent files) — and a request can cover **several repositories** at once.
+
+| Source | Where the bundle comes from | Who can use it |
+|---|---|---|
+| `builtin` | Baked into the worker image (`agent-bundle/`), unrestricted as before | everyone |
+| `curated` | A repository listed in `config/generators.yaml` | everyone |
+| `user` | A repository the user added (`POST /api/generators`), saved per user | the user; the repository must match the operator `allow` patterns |
+
+Repository generators are resolved to the head commit of their branch when the job is **created** (the API
+fetches and loads the bundle, so inputs, model lock and output paths shown in the form are the real ones) and the
+job stores that commit (`jobs.generator_sha`). The worker downloads exactly that revision with the requesting
+user's token, loads it under the platform's hard limits (no shell/url/memory tools, no MCP servers, no repository
+instructions, documentation-only outputs below `docs/`; see `docs/security.md`) and runs it with a per-bundle
+adapter. The job also records the bundle's output allowlist, which publishing re-checks. A bundle's own
+`bundle.yaml` can sit next to existing agent files with `agents_dir: "."`.
+
+`POST /api/bounded-context/batches` validates the generator, model and inputs once and then creates one ordinary
+job per repository (checked a few at a time); jobs share `batch_id` and are otherwise independent — each is
+reviewed, retried, cancelled and published on its own. Duplicate prevention is per
+user/repository/branch/model/**generator**.
+
+### Models
+
+`GET /api/models` asks the Copilot API for the models the signed-in user's token can use (cached ~2 minutes) and
+falls back to the operator catalog (`config/models.yaml`) with an explicit `warning` when that fails; job creation
+validates against the same list. GitHub does not document this listing endpoint, so it is best-effort by design
+(see `docs/discovery.md`); `BCP_COPILOT_API_URL=off` disables it.
 
 ## 3. Identity and GitHub permission model
 
@@ -159,7 +190,8 @@ See `backend/crates/bcp-store/migrations/0001_init.sql` for the authoritative sc
 | `users` | GitHub id, login, name, avatar | |
 | `github_tokens` | encrypted access/refresh tokens + expiries | AES-256-GCM, key not in DB |
 | `sessions` | sha256(session id), user, expiry | |
-| `jobs` | inputs, status/stage, base SHA, agent version, error, publish fields | No tokens, no repository source |
+| `jobs` | inputs, status/stage, base SHA, agent version, generator (source, repo, branch, path, pinned SHA), batch id, output allowlist, error, publish fields | No tokens, no repository source |
+| `user_generators` | generator repositories a user saved | per user; re-validated against the allowlist on use |
 | `job_artifacts` | generated file content, base content of the same file, unified diff | Only the agent's output path(s) |
 | `job_events` | redacted log lines and stage transitions | capped per job |
 | `job_tasks` | queue | |

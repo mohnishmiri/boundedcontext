@@ -404,6 +404,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
+ "thiserror 2.0.21",
  "time",
  "tokio",
  "tokio-stream",
@@ -495,11 +496,15 @@ dependencies = [
 name = "bcp-services"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bcp-agent",
  "bcp-core",
  "bcp-github",
  "bcp-store",
  "chrono",
  "metrics",
+ "tempfile",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -536,6 +541,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "globset",
  "metrics",
  "mock-github",
  "rand 0.8.8",

@@ -1,8 +1,12 @@
 import type {
-  AgentInfo,
+  BatchResponse,
   BranchPage,
+  Generator,
+  GeneratorAgentInfo,
+  GeneratorList,
   Job,
   JobDiff,
+  JobSummary,
   ModelList,
   OrganizationList,
   Page,
@@ -42,6 +46,22 @@ export const repositories: Page<Repository> = {
   has_more: false,
 };
 
+export const personalRepository: Repository = {
+  ...repository,
+  id: 20,
+  owner: 'octocat',
+  name: 'notes',
+  full_name: 'octocat/notes',
+  private: false,
+  description: null,
+  default_branch: 'trunk',
+};
+
+export const repositoriesByOwner: Record<string, Page<Repository>> = {
+  acme: repositories,
+  octocat: { ...repositories, items: [personalRepository] },
+};
+
 export const repositoryDetail: RepositoryDetail = { ...repository, can_generate: true, can_publish: true, reason: null };
 
 export const branches: BranchPage = {
@@ -55,7 +75,20 @@ export const branches: BranchPage = {
   default_branch: 'main',
 };
 
-export const agent: AgentInfo = {
+export const GENERATOR_ID = 'bounded-context';
+
+export const builtinGenerator: Generator = {
+  id: GENERATOR_ID,
+  name: 'Bounded Context Generator',
+  description: 'Writes a bounded-context document.',
+  source: 'builtin',
+  repository: null,
+  removable: false,
+};
+
+export const generators: GeneratorList = { items: [builtinGenerator], default_id: GENERATOR_ID };
+
+export const agent: GeneratorAgentInfo = {
   id: 'bounded-context',
   name: 'Bounded Context Generator',
   description: 'Writes a bounded-context document.',
@@ -74,6 +107,9 @@ export const agent: AgentInfo = {
       max_length: 200,
     },
   ],
+  locked_model: null,
+  lock_reason: null,
+  resolved: { branch: null, sha: null },
 };
 
 export const models: ModelList = {
@@ -82,8 +118,8 @@ export const models: ModelList = {
     { id: 'claude-haiku-4.5', name: 'Claude Haiku 4.5', vendor: 'Anthropic', description: null, multiplier: 0.33, is_default: false },
   ],
   default_model: 'auto',
-  locked_model: null,
-  lock_reason: null,
+  source: 'copilot',
+  warning: null,
   entitlement_note: 'Availability is enforced by GitHub Copilot for your account at run time.',
 };
 
@@ -119,9 +155,11 @@ export function makeJob(overrides: Partial<Job> = {}): Job {
     created_at: '2026-10-24T10:00:00Z',
     finished_at: null,
     requested_by: 'octocat',
+    batch_id: null,
     repository_url: 'https://github.com/acme/shop',
     base_sha: null,
     agent: { id: 'bounded-context', version: 'sha256:abc123', placeholder: true },
+    generator: null,
     inputs: {},
     steps: generationSteps(['active']),
     error: null,
@@ -147,6 +185,31 @@ export function makeJob(overrides: Partial<Job> = {}): Job {
     },
     ...overrides,
   };
+}
+
+export function toSummary(job: Job): JobSummary {
+  return {
+    id: job.id,
+    short_id: job.short_id,
+    owner: job.owner,
+    repo: job.repo,
+    base_branch: job.base_branch,
+    model: job.model,
+    status: job.status,
+    stage: job.stage,
+    publish_status: job.publish_status,
+    pr_url: job.pr_url,
+    created_at: job.created_at,
+    finished_at: job.finished_at,
+    requested_by: job.requested_by,
+    batch_id: job.batch_id,
+  };
+}
+
+export const BATCH_ID = '5a000000-3333-4d4d-8e8e-00000000000b';
+
+export function makeBatchResponse(overrides: Partial<BatchResponse> = {}): BatchResponse {
+  return { batch_id: BATCH_ID, jobs: [], failures: [], ...overrides };
 }
 
 export function runningJob(overrides: Partial<Job> = {}): Job {

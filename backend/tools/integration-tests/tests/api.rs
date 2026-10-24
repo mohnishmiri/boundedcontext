@@ -131,11 +131,48 @@ async fn agent_and_models() {
     assert_eq!(agent.body["placeholder"], true);
     assert_eq!(agent.body["output_paths"][0], "docs/bounded-context.md");
     assert_eq!(agent.body["inputs"][0]["name"], "scope_path");
+    // Models come from the user's own Copilot entitlement (mock: chat models that are enabled for octocat).
     let models = h.get("/api/models", &cookie).await;
+    assert_eq!(models.body["source"], "copilot", "{}", models.text);
+    assert!(models.body["warning"].is_null());
     assert_eq!(models.body["default_model"], "auto");
-    assert!(models.body["locked_model"].is_null());
+    let ids: Vec<_> = models.body["items"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["auto", "gpt-5", "claude-sonnet-4.5"], "chat + enabled only, plus auto");
+    // A different account sees a different list.
+    let viewer = h.login("viewer").await;
+    let models = h.get("/api/models", &viewer).await;
+    let ids: Vec<_> = models.body["items"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["auto", "gpt-5-mini"]);
+}
+
+#[tokio::test]
+async fn models_fall_back_to_the_catalog_when_copilot_is_unavailable() {
+    let Some(h) = Harness::new().await else { return };
+    h.mock.with(|s| s.fail_next("copilot_models", 500, 5));
+    let cookie = h.login("octocat").await;
+    let models = h.get("/api/models", &cookie).await;
+    assert_eq!(models.status, StatusCode::OK);
+    assert_eq!(models.body["source"], "catalog");
+    assert!(models.body["warning"].as_str().unwrap().contains("standard list"));
     let ids: Vec<_> = models.body["items"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"auto") && !ids.contains(&"claude-opus-5.5"), "unverified models hidden: {ids:?}");
+}
+
+#[tokio::test]
+async fn jobs_validate_the_model_against_the_users_entitlement() {
+    let Some(h) = Harness::new().await else { return };
+    let viewer = h.login("viewer").await;
+    // `gpt-5` is listed for octocat but not for viewer.
+    let r = h
+        .post(
+            "/api/bounded-context/jobs",
+            &viewer,
+            Some(json!({ "owner": "acme", "repo": "shop", "base_branch": "main", "model": "gpt-5" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.text);
+    assert_eq!(r.body["error"]["code"], "model_unavailable");
+    assert!(r.body["error"]["message"].as_str().unwrap().contains("your GitHub Copilot account"));
 }
 
 #[tokio::test]

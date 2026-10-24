@@ -18,6 +18,29 @@ beforeEach(() => {
 });
 
 describe('Job page', () => {
+  it('shows the generator and a link to the batch', async () => {
+    serveJob(
+      f.failedJob({
+        batch_id: f.BATCH_ID,
+        generator: {
+          id: 'g1',
+          name: 'Team generator',
+          source: 'user',
+          owner: 'acme',
+          repo: 'bc-gen',
+          branch: 'main',
+          path: null,
+          sha: 'abcdef1234567890',
+        },
+      }),
+    );
+    renderApp(`/jobs/${f.JOB_ID}`);
+
+    expect(await screen.findByText('Generator')).toBeInTheDocument();
+    expect(screen.getByText('Team generator')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Batch' })).toHaveAttribute('href', `/batches/${f.BATCH_ID}`);
+  });
+
   it('shows generation steps and an actionable error for a failed job, and retries', async () => {
     serveJob(f.failedJob());
     const retried = f.makeJob({ id: '99999999-0000-4000-8000-000000000000' });

@@ -34,8 +34,11 @@ COPY --from=build /out/bcp-api /usr/local/bin/bcp-api
 # The API reads the agent bundle (GET /api/agent, input validation, model lock) and the model catalog.
 COPY agent-bundle/ /opt/agent-bundle/
 COPY config/models.yaml /etc/bcp/models.yaml
+COPY config/generators.yaml /etc/bcp/generators.yaml
 ENV BCP_AGENT_BUNDLE_DIR=/opt/agent-bundle \
     BCP_MODELS_FILE=/etc/bcp/models.yaml \
+    BCP_GENERATORS_FILE=/etc/bcp/generators.yaml \
+    BCP_WORK_DIR=/tmp/bcp-work \
     BCP_LOG_FORMAT=json
 USER 10001:10001
 EXPOSE 8080 9090

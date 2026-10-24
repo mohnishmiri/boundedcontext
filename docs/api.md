@@ -35,11 +35,11 @@ type ErrorCode =
 |---|---|
 | 400 | `validation_failed` (with `details.fields: {name: message}`) |
 | 401 | `unauthenticated`, `github_auth_expired` (sign in again) |
-| 403 | `forbidden`, `csrf_rejected`, `repository_access_denied`, `copilot_unauthorized` |
+| 403 | `forbidden`, `csrf_rejected`, `repository_access_denied`, `generator_not_allowed`, `copilot_unauthorized` |
 | 404 | `not_found`, `app_not_installed` |
 | 409 | `duplicate_job` (`details.job_id`), `conflict`, `model_locked_by_agent` |
 | 413 | `payload_too_large` |
-| 422 | `model_unavailable` |
+| 422 | `model_unavailable`, `generator_invalid` |
 | 429 | `rate_limited`, `github_rate_limited` (`Retry-After` header) |
 | 502/503 | `github_unavailable`, `agent_unavailable` |
 
@@ -71,12 +71,19 @@ type JobSummary = {
   pr_url: string | null;
   created_at: string; finished_at: string | null;
   requested_by: string;       // GitHub login
+  batch_id: string | null;    // set when the job was created by `POST /batches`
 };
+
+type GeneratorSource = "builtin" | "curated" | "user";
 
 type Job = JobSummary & {
   repository_url: string;     // https://github.com/{owner}/{repo}
   base_sha: string | null;    // resolved when the job starts
   agent: { id: string; version: string; placeholder: boolean };
+  // Which generator produced this job; null only for jobs created before generators existed.
+  generator: null | { id: string | null; name: string; source: GeneratorSource;
+                      owner: string | null; repo: string | null; branch: string | null;
+                      path: string | null; sha: string | null };   // sha = pinned revision that ran
   inputs: Record<string, string>;
   steps: Step[];              // generation steps, in order
   error: JobError | null;
@@ -143,13 +150,42 @@ type Repository = { id: number; owner: string; name: string; full_name: string; 
 Page<{ name: string; commit_sha: string; protected: boolean }> & { default_branch: string }
 ```
 
-### Agent and models
+### Generators, agent and models
 
-`GET /api/agent` → `200`
+A **generator** is an agent bundle (`bundle.yaml` + agent files, see `agent-bundle/README.md`) that produces the
+documentation. The built-in one ships with the worker image; operators can list *curated* generator repositories
+and an allowlist of repositories users may add themselves (`config/generators.yaml`).
+
+`GET /api/generators` → `200`
+```ts
+{ items: Generator[]; default_id: string /* "builtin" */; can_add: boolean }
+type Generator = {
+  id: string;                      // "builtin", a curated id, or a uuid for a saved (user) generator
+  name: string; description: string | null;
+  source: GeneratorSource;
+  repository: { owner: string; repo: string; branch: string | null; path: string } | null;
+  removable: boolean;              // true only for the caller's own saved generators
+};
+```
+
+`POST /api/generators` `{ owner, repo, branch?, path?, name? }` → `201 Generator`. The repository must match the
+operator allowlist (`403 generator_not_allowed`) and is actually fetched and loaded, so a saved generator is known
+to work (`422 generator_invalid` explains what is wrong: no `bundle.yaml`, invalid manifest, outputs outside
+documentation, MCP servers…). `path` is the directory holding `bundle.yaml` (default: repository root); `branch`
+defaults to the repository's default branch. Re-adding the same repository/branch/path returns the existing entry.
+`409 conflict` once the per-user cap (`max_user_generators`) is reached.
+
+`DELETE /api/generators/{id}` → `204` (own saved generators only; `404` otherwise).
+
+`GET /api/generators/{id}/agent` → `200` — what the form needs for that generator, resolved at the head of its
+branch (`GET /api/agent` is the same for the built-in generator):
 ```ts
 { id: string; name: string; description: string; version: string; placeholder: boolean;
   output_paths: string[];               // where the agent writes, from the bundle manifest
-  inputs: AgentInput[] }                // only inputs the existing workflow genuinely needs (often empty)
+  inputs: AgentInput[];                 // only inputs the existing workflow genuinely needs (often empty)
+  locked_model: string | null;          // set when the agent file pins `model:` — selection is fixed
+  lock_reason: string | null;
+  resolved: { branch: string | null; sha: string | null } }   // null for the built-in generator
 type AgentInput = { name: string; label: string; help: string | null; required: boolean;
   kind: "text" | "select" | "path"; choices: string[] | null; default: string | null; max_length: number };
 ```
@@ -159,22 +195,44 @@ type AgentInput = { name: string; label: string; help: string | null; required: 
 { items: { id: string; name: string; vendor: string; description: string | null;
            multiplier: number | null; is_default: boolean }[];
   default_model: string;
-  locked_model: string | null;          // set when the agent file pins `model:` — selection is fixed
-  lock_reason: string | null;
-  entitlement_note: string }            // e.g. "Availability is enforced by GitHub Copilot for your account at run time."
+  source: "copilot" | "catalog";        // "copilot": listed by GitHub Copilot for the caller's own token
+  warning: string | null;               // set when the live lookup failed and the catalog is shown instead
+  entitlement_note: string }
 ```
+The list is fetched with the signed-in user's token (cached ~2 minutes per user), so it reflects that account's
+plan and organisation policy. `auto` (Copilot chooses) is always offered. If the lookup fails the operator
+catalog (`config/models.yaml`) is returned with `source: "catalog"` and a `warning`. Job creation validates the
+model against the same list.
 
 ### Jobs
 
 `POST /api/bounded-context/jobs`
 ```ts
 // request
-{ owner: string; repo: string; base_branch: string; model: string; inputs?: Record<string, string> }
+{ owner: string; repo: string; base_branch: string; model: string; inputs?: Record<string, string>;
+  generator_id?: string /* default "builtin" */ }
 ```
 → `202 Job`. Validates fields, checks the user can read the repo (and warns via `can_publish` if they cannot
-push), checks the model against the catalog and agent lock, rejects active duplicates (`409 duplicate_job`).
+push), checks the model against the user's model list and the generator's model lock, rejects active duplicates
+(`409 duplicate_job`; the same repo/branch/model may run once per generator at a time). Repository generators are
+pinned to their branch head at request time (`job.generator.sha`).
 
-`GET /api/bounded-context/jobs?status=<JobStatus>&owner=&repo=&page=1&per_page=20` → `200 Page<JobSummary>`
+`POST /api/bounded-context/batches` — one generation per selected repository
+```ts
+// request
+{ generator_id: string; model: string; inputs?: Record<string, string>;
+  repositories: { owner: string; repo: string; base_branch: string }[] }   // 1..25 (BCP_BATCH_MAX_REPOS)
+// response 202
+{ batch_id: string; jobs: JobSummary[];
+  failures: { owner: string; repo: string; base_branch: string;
+              error: { code: ErrorCode; message: string; details?: unknown } }[] }
+```
+Request-level problems (unknown generator, invalid model or inputs, empty/duplicate/oversized repository list)
+fail the whole request with the usual error envelope before anything is queued. Each repository is then checked
+on its own: the ones that pass are queued as independent jobs sharing `batch_id`; the rest are returned in
+`failures` (e.g. `app_not_installed`, `repository_access_denied`, `duplicate_job`, `rate_limited`).
+
+`GET /api/bounded-context/jobs?status=<JobStatus>&owner=&repo=&batch_id=&page=1&per_page=20` → `200 Page<JobSummary>`
 (only the caller's jobs).
 
 `GET /api/bounded-context/jobs/{job_id}` → `200 Job`
@@ -205,8 +263,8 @@ succeeded. `403 repository_access_denied` if the user lacks push permission.
 `POST /api/bounded-context/jobs/{job_id}/cancel` → `202 Job` (`cancel_requested = true`, or `cancelled` if it
 was still queued). `409 conflict` if already terminal.
 
-`POST /api/bounded-context/jobs/{job_id}/retry` → `202 Job` — a **new** job with the same inputs (allowed for
-`failed`/`cancelled`).
+`POST /api/bounded-context/jobs/{job_id}/retry` → `202 Job` — a **new** job with the same inputs and generator, at the
+generator repository's current head (allowed for `failed`/`cancelled`).
 
 ### Operations (no auth, not routed through the public ingress except `/healthz`)
 

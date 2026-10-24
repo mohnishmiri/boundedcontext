@@ -15,7 +15,9 @@ const JOB_COLUMNS: &str = r#"
     j.cancel_requested, j.output_primary, j.publish_status, j.publish_stage, j.publish_stage_times,
     j.publish_requested_by, j.publish_branch, j.publish_commit_sha, j.publish_pr_number, j.publish_pr_url,
     j.publish_error_code, j.publish_error_message, j.publish_error_retryable, j.publish_updated_at,
-    j.created_at, j.started_at, j.finished_at, j.updated_at
+    j.created_at, j.started_at, j.finished_at, j.updated_at, j.batch_id, j.generator_source, j.generator_id,
+    j.generator_name, j.generator_owner, j.generator_repo, j.generator_branch, j.generator_path, j.generator_sha,
+    j.generator_key, j.output_paths
 "#;
 
 #[derive(Debug, Clone, FromRow)]
@@ -61,9 +63,58 @@ pub struct JobRow {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+    pub batch_id: Option<Uuid>,
+    pub generator_source: String,
+    pub generator_id: Option<String>,
+    pub generator_name: Option<String>,
+    pub generator_owner: Option<String>,
+    pub generator_repo: Option<String>,
+    pub generator_branch: Option<String>,
+    pub generator_path: Option<String>,
+    pub generator_sha: Option<String>,
+    pub generator_key: String,
+    pub output_paths: Value,
+}
+
+/// Which generator (agent bundle) a job runs. `builtin` has no repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobGenerator {
+    /// `builtin`, `curated` or `user`.
+    pub source: String,
+    pub id: Option<String>,
+    pub name: String,
+    pub owner: Option<String>,
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    pub path: Option<String>,
+    /// Pinned revision of the generator repository.
+    pub sha: Option<String>,
+    /// Duplicate-prevention identity.
+    pub key: String,
+}
+
+impl JobGenerator {
+    pub fn builtin(name: impl Into<String>) -> Self {
+        Self {
+            source: "builtin".into(),
+            id: Some("builtin".into()),
+            name: name.into(),
+            owner: None,
+            repo: None,
+            branch: None,
+            path: None,
+            sha: None,
+            key: "builtin".into(),
+        }
+    }
 }
 
 impl JobRow {
+    /// Output allowlist recorded when the job was created (empty for jobs created before it was recorded).
+    pub fn output_globs(&self) -> Vec<String> {
+        serde_json::from_value(self.output_paths.clone()).unwrap_or_default()
+    }
+
     pub fn status(&self) -> JobStatus {
         JobStatus::parse(&self.status).unwrap_or(JobStatus::Failed)
     }
@@ -101,6 +152,9 @@ pub struct NewJob {
     pub agent_version: String,
     pub agent_placeholder: bool,
     pub max_attempts: i32,
+    pub batch_id: Option<Uuid>,
+    pub generator: JobGenerator,
+    pub output_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,6 +162,7 @@ pub struct JobFilter {
     pub status: Option<JobStatus>,
     pub owner: Option<String>,
     pub repo: Option<String>,
+    pub batch_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -179,16 +234,18 @@ impl Store {
         repo: &str,
         branch: &str,
         model: &str,
+        generator_key: &str,
     ) -> Result<Option<Uuid>> {
         Ok(sqlx::query_scalar(
             "SELECT id FROM jobs WHERE user_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
-               AND base_branch = $4 AND model = $5 AND status IN ('queued', 'running') LIMIT 1",
+               AND base_branch = $4 AND model = $5 AND generator_key = $6 AND status IN ('queued', 'running') LIMIT 1",
         )
         .bind(user_id)
         .bind(owner)
         .bind(repo)
         .bind(branch)
         .bind(model)
+        .bind(generator_key)
         .fetch_optional(&self.pool)
         .await?)
     }
@@ -200,8 +257,11 @@ impl Store {
         let inserted = sqlx::query(
             r#"
             INSERT INTO jobs (id, user_id, owner, repo, repo_id, installation_id, base_branch, model, inputs,
-                              can_push, retry_of, agent_id, agent_version, agent_placeholder)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                              can_push, retry_of, agent_id, agent_version, agent_placeholder, batch_id,
+                              generator_source, generator_id, generator_name, generator_owner, generator_repo,
+                              generator_branch, generator_path, generator_sha, generator_key, output_paths)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+                    $22, $23, $24, $25)
             "#,
         )
         .bind(id)
@@ -218,6 +278,17 @@ impl Store {
         .bind(&new.agent_id)
         .bind(&new.agent_version)
         .bind(new.agent_placeholder)
+        .bind(new.batch_id)
+        .bind(&new.generator.source)
+        .bind(&new.generator.id)
+        .bind(&new.generator.name)
+        .bind(&new.generator.owner)
+        .bind(&new.generator.repo)
+        .bind(&new.generator.branch)
+        .bind(&new.generator.path)
+        .bind(&new.generator.sha)
+        .bind(&new.generator.key)
+        .bind(serde_json::json!(new.output_paths))
         .execute(&mut *tx)
         .await;
         if let Err(e) = inserted {
@@ -225,7 +296,14 @@ impl Store {
             if err.unique_violation() == Some("jobs_active_unique") {
                 drop(tx);
                 let existing = self
-                    .active_job_for(new.user_id, &new.owner, &new.repo, &new.base_branch, &new.model)
+                    .active_job_for(
+                        new.user_id,
+                        &new.owner,
+                        &new.repo,
+                        &new.base_branch,
+                        &new.model,
+                        &new.generator.key,
+                    )
                     .await?
                     .ok_or(StoreError::Conflict("duplicate job vanished"))?;
                 return Err(StoreError::DuplicateJob(existing));
@@ -253,10 +331,11 @@ impl Store {
         let offset = i64::from(page.saturating_sub(1)) * i64::from(per_page);
         let where_sql = "j.user_id = $1 AND ($2::text IS NULL OR j.status = $2)
                          AND ($3::text IS NULL OR lower(j.owner) = lower($3))
-                         AND ($4::text IS NULL OR lower(j.repo) = lower($4))";
+                         AND ($4::text IS NULL OR lower(j.repo) = lower($4))
+                         AND ($5::uuid IS NULL OR j.batch_id = $5)";
         let sql = format!(
             "SELECT {JOB_COLUMNS} FROM jobs j JOIN users u ON u.id = j.user_id WHERE {where_sql}
-             ORDER BY j.created_at DESC, j.id LIMIT $5 OFFSET $6"
+             ORDER BY j.created_at DESC, j.id LIMIT $6 OFFSET $7"
         );
         let status = filter.status.map(|s| s.as_str());
         let rows = sqlx::query_as::<_, JobRow>(&sql)
@@ -264,6 +343,7 @@ impl Store {
             .bind(status)
             .bind(filter.owner.as_deref())
             .bind(filter.repo.as_deref())
+            .bind(filter.batch_id)
             .bind(i64::from(per_page))
             .bind(offset)
             .fetch_all(&self.pool)
@@ -273,6 +353,7 @@ impl Store {
             .bind(status)
             .bind(filter.owner.as_deref())
             .bind(filter.repo.as_deref())
+            .bind(filter.batch_id)
             .fetch_one(&self.pool)
             .await?;
         Ok((rows, total))
@@ -386,7 +467,7 @@ impl Store {
         job_id: Uuid,
         base_sha: &str,
         repo_id: i64,
-        installation_id: i64,
+        installation_id: Option<i64>,
         can_push: bool,
     ) -> Result<()> {
         sqlx::query(

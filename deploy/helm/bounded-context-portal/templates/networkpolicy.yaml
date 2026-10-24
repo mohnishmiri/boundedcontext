@@ -194,13 +194,12 @@ spec:
         {{- range $np.cilium.githubFqdns }}
         - matchName: {{ . | quote }}
         {{- end }}
-        {{- if eq $component "worker" }}
+        {{- /* The api lists the user's models from the Copilot API; the worker runs the agent against it. */}}
         {{- range $np.cilium.copilotFqdnPatterns }}
         {{- if contains "*" . }}
         - matchPattern: {{ . | quote }}
         {{- else }}
         - matchName: {{ . | quote }}
-        {{- end }}
         {{- end }}
         {{- end }}
       toPorts:

@@ -1,9 +1,15 @@
 import type {
   AgentInfo,
   ApiErrorBody,
+  BatchResponse,
   BranchPage,
+  CreateBatchRequest,
+  CreateGeneratorRequest,
   CreateJobRequest,
   ErrorCode,
+  Generator,
+  GeneratorAgentInfo,
+  GeneratorList,
   Job,
   JobDiff,
   JobStatus,
@@ -137,7 +143,7 @@ async function toApiError(res: Response): Promise<ApiError> {
 }
 
 type RequestOptions = {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'DELETE';
   query?: Record<string, string | number | undefined | null>;
   body?: unknown;
   /** Do not invoke the unauthorized handler (used by the session probe). */
@@ -243,8 +249,25 @@ export function listBranches(
   return request(`/github/repositories/${seg(owner)}/${seg(repo)}/branches`, { query: params, signal });
 }
 
-// ---------- agent and models ----------
+// ---------- generators, agent and models ----------
 
+export function listGenerators(signal?: AbortSignal): Promise<GeneratorList> {
+  return request('/generators', { signal });
+}
+
+export function createGenerator(body: CreateGeneratorRequest): Promise<Generator> {
+  return request('/generators', { method: 'POST', body });
+}
+
+export function deleteGenerator(id: string): Promise<void> {
+  return request(`/generators/${seg(id)}`, { method: 'DELETE' });
+}
+
+export function getGeneratorAgent(id: string, signal?: AbortSignal): Promise<GeneratorAgentInfo> {
+  return request(`/generators/${seg(id)}/agent`, { signal });
+}
+
+/** The built-in generator's info. The UI uses `getGeneratorAgent`; kept for completeness. */
 export function getAgent(signal?: AbortSignal): Promise<AgentInfo> {
   return request('/agent', { signal });
 }
@@ -261,8 +284,19 @@ export function createJob(body: CreateJobRequest): Promise<Job> {
   return request(JOBS, { method: 'POST', body });
 }
 
+export function createBatch(body: CreateBatchRequest): Promise<BatchResponse> {
+  return request('/bounded-context/batches', { method: 'POST', body });
+}
+
 export function listJobs(
-  params: { status?: JobStatus; owner?: string; repo?: string; page?: number; per_page?: number },
+  params: {
+    status?: JobStatus;
+    owner?: string;
+    repo?: string;
+    batch_id?: string;
+    page?: number;
+    per_page?: number;
+  },
   signal?: AbortSignal,
 ): Promise<Page<JobSummary>> {
   return request(JOBS, { query: params, signal });

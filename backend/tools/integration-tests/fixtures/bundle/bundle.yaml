@@ -1,0 +1,64 @@
+# Agent bundle manifest — consumed by bcp-agent (crates/bcp-agent/src/bundle.rs).
+#
+# ⚠️  PLACEHOLDER. The real bounded-context agent was not available when this platform was built
+# (see docs/discovery.md). Replace the files in agents/ with the real agent *verbatim*, then update the
+# values marked "DISCOVER" below from the real agent and the prompt your developers type in VS Code.
+# See agent-bundle/README.md for the procedure.
+
+schema_version: 1
+
+# Set to false once the real agent is installed. The UI shows a warning banner while this is true.
+placeholder: true
+
+agent:
+  # DISCOVER: must equal the file name of the agent in agents/ without ".agent.md".
+  id: bounded-context
+  display_name: Bounded Context Generator (placeholder)
+  description: >-
+    Placeholder agent that analyses a repository and writes a bounded-context document. Replace with the
+    real agent used in VS Code.
+
+prompt:
+  # DISCOVER: the exact prompt developers give the agent in VS Code.
+  # Available variables (all validated server-side before rendering):
+  #   {{owner}} {{repo}} {{branch}} {{sha}} {{output_path}} and every input name declared below.
+  # Unknown variables are a manifest error at startup.
+  template: |
+    Generate the bounded context documentation for this repository ({{owner}}/{{repo}}, branch {{branch}}).
+    {{#scope_path}}Limit the analysis to the directory `{{scope_path}}`.{{/scope_path}}
+    Write the result to `{{output_path}}`. Do not modify any other file.
+
+# Only inputs the existing workflow genuinely needs. Most agents need none.
+inputs:
+  - name: scope_path
+    label: Subdirectory to analyse
+    help: Leave empty to analyse the whole repository (useful for monorepos).
+    kind: path          # text | select | path   (path = repository-relative, validated, no "..")
+    required: false
+    default: ""
+    max_length: 200
+
+output:
+  # DISCOVER: where the real agent writes its Markdown.
+  # Files changed by the agent are committed only if they match one of these globs.
+  paths:
+    - docs/bounded-context.md
+  # File shown first in the review screen and used as {{output_path}}. Omit when the agent chooses
+  # file names itself; the first matching changed file is used instead.
+  primary: docs/bounded-context.md
+  min_bytes: 64
+  max_bytes: 1048576
+
+runtime:
+  timeout_secs: 1200
+  # Copilot CLI permission kinds: shell, write, read, url, memory, or an MCP server name.
+  allow_tools: [read, write]
+  deny_tools: [shell, url, memory]
+  # Built-in MCP servers to switch off for this run (the GitHub MCP server would otherwise act with the
+  # user's token). Verify names against the pinned CLI version with `copilot mcp list`.
+  disable_mcp_servers: [github-mcp-server]
+  # false => pass --no-custom-instructions so instruction files inside the *analysed* repository are not
+  # loaded (they are untrusted). Set to true only if the real agent depends on them.
+  repository_instructions: false
+  # Optional MCP configuration file inside this bundle, passed via --additional-mcp-config.
+  # mcp_config: mcp.json

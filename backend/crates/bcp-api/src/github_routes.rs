@@ -92,9 +92,75 @@ pub(crate) async fn installations(
     Ok(list)
 }
 
+async fn user_repos(state: &AppState, user_id: Uuid, token: &str) -> Result<Arc<Vec<GhRepo>>, AppError> {
+    let key = format!("userrepos:{user_id}");
+    if let Some(v) = state.cache.get::<Vec<GhRepo>>(&key, LIST_TTL) {
+        return Ok(v);
+    }
+    let (mut list, truncated) =
+        state.github.list_user_repos(token, MAX_LIST_PAGES).await.map_err(|e| e.to_user_error())?;
+    if truncated {
+        tracing::warn!(%user_id, "user repository listing truncated at {} entries", list.len());
+    }
+    list.retain(|r| !r.archived);
+    list.sort_by_key(|r| r.name.to_ascii_lowercase());
+    let list = Arc::new(list);
+    state.cache.put(key, list.clone());
+    Ok(list)
+}
+
 /// `GET /api/github/organizations`
 pub async fn organizations(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
     let token = state.tokens.access_token(user.user.id).await?;
+    if !state.github.has_app() {
+        let mut seen = std::collections::BTreeMap::<String, Value>::new();
+        seen.insert(
+            user.user.login.to_ascii_lowercase(),
+            json!({
+                "installation_id": user.user.github_id.max(1),
+                "login": user.user.login,
+                "type": "User",
+                "avatar_url": user.user.avatar_url,
+            }),
+        );
+        if let Ok(orgs) = state.github.list_user_orgs(&token).await {
+            for org in orgs {
+                seen.entry(org.login.to_ascii_lowercase()).or_insert_with(|| {
+                    json!({
+                        "installation_id": org.id,
+                        "login": org.login,
+                        "type": "Organization",
+                        "avatar_url": org.avatar_url,
+                    })
+                });
+            }
+        }
+        if let Ok(repos) = user_repos(&state, user.user.id, &token).await {
+            for (idx, r) in repos.iter().enumerate() {
+                let key = r.owner.login.to_ascii_lowercase();
+                seen.entry(key).or_insert_with(|| {
+                    let kind = if !r.owner.kind.is_empty() {
+                        r.owner.kind.as_str()
+                    } else if r.owner.login.eq_ignore_ascii_case(&user.user.login) {
+                        "User"
+                    } else {
+                        "Organization"
+                    };
+                    let id = if r.owner.id > 0 { r.owner.id } else { 1_000_000 + idx as i64 };
+                    json!({
+                        "installation_id": id,
+                        "login": r.owner.login,
+                        "type": kind,
+                        "avatar_url": r.owner.avatar_url,
+                    })
+                });
+            }
+        }
+        let mut items: Vec<Value> = seen.into_values().collect();
+        items.sort_by_key(|v| v["login"].as_str().unwrap_or_default().to_ascii_lowercase());
+        return Ok(Json(json!({ "items": items, "install_url": Value::Null })));
+    }
+
     let list = installations(&state, user.user.id, &token).await?;
     let mut items: Vec<Value> = list
         .iter()
@@ -122,6 +188,19 @@ pub async fn repositories(
     let (page, per_page) = page_params(q.page, q.per_page, 30)?;
     let filter = normalise_query(q.q)?;
     let token = state.tokens.access_token(user.user.id).await?;
+    if !state.github.has_app() {
+        let all_repos = user_repos(&state, user.user.id, &token).await?;
+        let filtered: Vec<&GhRepo> = all_repos
+            .iter()
+            .filter(|r| r.owner.login.eq_ignore_ascii_case(&q.owner))
+            .filter(|r| filter.as_ref().is_none_or(|f| r.name.to_ascii_lowercase().contains(f)))
+            .collect();
+        let (items, has_more) = paginate(&filtered, page, per_page);
+        let items: Vec<RepositoryView> = items.into_iter().map(RepositoryView::from).collect();
+        return Ok(Json(
+            json!({ "items": items, "page": page, "per_page": per_page, "has_more": has_more, "total": filtered.len() }),
+        ));
+    }
     let inst = installations(&state, user.user.id, &token)
         .await?
         .iter()
@@ -201,7 +280,8 @@ pub async fn repository(
     validate_repo_path(&owner, &repo)?;
     let token = state.tokens.access_token(user.user.id).await?;
     let r = state.github.get_repository(&token, &owner, &repo).await.map_err(|e| e.to_user_error())?;
-    let installed = repo_installation(&state, &owner, &repo).await?.is_some();
+    let installed =
+        if state.github.has_app() { repo_installation(&state, &owner, &repo).await?.is_some() } else { true };
     let p = r.permissions();
     let can_generate = installed && p.pull && !r.archived;
     let can_publish = can_generate && p.push;
@@ -281,31 +361,5 @@ pub async fn agent(State(state): State<AppState>, _user: CurrentUser) -> Json<Va
     Json(json!({
         "id": a.id, "name": a.name, "description": a.description, "version": a.version,
         "placeholder": a.placeholder, "output_paths": a.output_paths, "inputs": a.inputs,
-    }))
-}
-
-/// `GET /api/models`
-pub async fn models(State(state): State<AppState>, _user: CurrentUser) -> Json<Value> {
-    let catalog = &state.catalog;
-    let locked = state.bundle.locked_model();
-    let items: Vec<Value> = catalog
-        .visible()
-        .map(|m| {
-            json!({
-                "id": m.id, "name": m.name, "vendor": m.vendor, "description": m.description,
-                "multiplier": m.multiplier, "is_default": m.id == catalog.default_model(),
-            })
-        })
-        .collect();
-    Json(json!({
-        "items": items,
-        "default_model": locked.unwrap_or(catalog.default_model()),
-        "locked_model": locked,
-        "lock_reason": locked.map(|m| format!(
-            "The bounded-context agent pins the model '{m}' in its definition, so GitHub Copilot always uses it."
-        )),
-        "entitlement_note": "Availability is enforced by GitHub Copilot for your account at run time. If your plan or \
-                             organisation policy does not allow the selected model, the job fails with a clear error \
-                             and no other model is substituted.",
     }))
 }

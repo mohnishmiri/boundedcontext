@@ -241,6 +241,55 @@ impl MockState {
             &[("octocat", Perm::WRITE)],
         );
 
+        // Generator repositories (agent bundles). They are readable by `octocat` but belong to no installation,
+        // so they never show up in the organisation / repository pickers.
+        let lite_bundle = "schema_version: 1\nplaceholder: true\nagent: { id: lite, display_name: Lite generator }\n\
+            prompt:\n  template: \"Document {{owner}}/{{repo}}@{{branch}}.{{#scope}} Only {{scope}}.{{/scope}}\"\n\
+            inputs:\n  - { name: scope, label: Scope, kind: path, required: false }\n\
+            output:\n  paths: [docs/bounded-context.md]\n  primary: docs/bounded-context.md\n";
+        s.add_repo(
+            "genhub",
+            "lite",
+            "A minimal generator",
+            &[
+                ("bundle.yaml", lite_bundle),
+                ("agents/lite.agent.md", "---\nname: Lite\ndescription: Lite generator\n---\n# Lite\n"),
+            ],
+            &[("octocat", Perm::READ)],
+        );
+        let nested_bundle = "schema_version: 1\nagents_dir: \".\"\nagent: { id: ctx }\n\
+            prompt:\n  template: \"Run the {{depth}} analysis for {{repo}}.\"\n\
+            inputs:\n  - { name: depth, label: Depth, kind: select, choices: [LEAN, FULL], default: LEAN }\n\
+            output:\n  paths: [docs/bounded-context.md]\n  primary: docs/bounded-context.md\n\
+            runtime:\n  allow_tools: [read, write, shell]\n  deny_tools: []\n";
+        s.add_repo(
+            "genhub",
+            "monorepo",
+            "Generator living in a sub-directory next to its agent files",
+            &[
+                ("README.md", "# Many generators\n"),
+                ("generators/ctx/bundle.yaml", nested_bundle),
+                ("generators/ctx/ctx.agent.md", "---\nname: Context analysis\n---\n# Ctx\n"),
+            ],
+            &[("octocat", Perm::READ)],
+        );
+        s.add_repo(
+            "genhub",
+            "no-bundle",
+            "Has no bundle.yaml",
+            &[("README.md", "# Nothing to run\n")],
+            &[("octocat", Perm::READ)],
+        );
+        let unsafe_bundle = "schema_version: 1\nagent: { id: bad }\nprompt:\n  template: \"Go\"\n\
+            output:\n  paths: [\".github/workflows/ci.yml\"]\n";
+        s.add_repo(
+            "genhub",
+            "unsafe",
+            "Wants to write CI workflows",
+            &[("bundle.yaml", unsafe_bundle), ("agents/bad.agent.md", "# Bad\n")],
+            &[("octocat", Perm::READ)],
+        );
+
         let acme_repos: Vec<String> =
             s.repos.keys().filter(|k| k.starts_with("acme/") && *k != "acme/not-installed").cloned().collect();
         s.installations = vec![
@@ -1156,6 +1205,31 @@ async fn mock_expire(AxState(st): AxState<AppState>, Json(l): Json<LoginReq>) ->
     StatusCode::NO_CONTENT
 }
 
+/// Stand-in for the Copilot API's model listing: what the calling user's token may use.
+async fn copilot_models(AxState(st): AxState<AppState>, headers: HeaderMap) -> Response {
+    let s = lock!(st, "copilot_models");
+    let Caller::User(login) = tri!(caller(&s, &headers)) else {
+        return err(StatusCode::FORBIDDEN, "user token required");
+    };
+    let model = |id: &str, name: &str, vendor: &str, kind: &str, policy: &str| {
+        json!({
+            "id": id, "name": name, "vendor": vendor, "model_picker_enabled": true,
+            "capabilities": { "type": kind }, "policy": { "state": policy }, "billing": { "multiplier": 1.0 },
+        })
+    };
+    let data = if login == "viewer" {
+        vec![model("gpt-5-mini", "GPT-5 mini", "OpenAI", "chat", "enabled")]
+    } else {
+        vec![
+            model("gpt-5", "GPT-5", "OpenAI", "chat", "enabled"),
+            model("claude-sonnet-4.5", "Claude Sonnet 4.5", "Anthropic", "chat", "enabled"),
+            model("text-embedding-3-small", "Embedding", "OpenAI", "embeddings", "enabled"),
+            model("retired-model", "Retired", "OpenAI", "chat", "disabled"),
+        ]
+    };
+    Json(json!({ "object": "list", "data": data })).into_response()
+}
+
 pub fn router(shared: Shared) -> Router {
     let st = AppState { shared };
     Router::new()
@@ -1178,6 +1252,7 @@ pub fn router(shared: Shared) -> Router {
         .route("/repos/{owner}/{repo}/git/refs", post(create_ref))
         .route("/repos/{owner}/{repo}/contents/{*path}", get(get_contents))
         .route("/repos/{owner}/{repo}/pulls", get(list_pulls).post(create_pull))
+        .route("/copilot/models", get(copilot_models))
         .route("/_mock/reset", post(mock_reset))
         .route("/_mock/state", get(mock_state))
         .route("/_mock/faults", post(mock_fault))

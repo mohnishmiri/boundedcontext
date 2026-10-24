@@ -34,6 +34,13 @@ config:
   # In-image locations (override only if you build custom images).
   agentBundleDir: /opt/agent-bundle
   modelsFile: /etc/bcp/models.yaml
+  generatorsFile: /etc/bcp/generators.yaml
+  # Copilot API used to list the models each signed-in user can use. Empty = https://api.githubcopilot.com
+  # (catalog only when githubApiUrl is not api.github.com); "off" = always use the model catalog.
+  copilotApiUrl: ""
+  copilotIntegrationId: copilot-developer-cli
+  # Most repositories one batch request may cover.
+  batchMaxRepos: 25
   otel:
     # OTLP gRPC endpoint, e.g. http://otel-collector.monitoring:4317. Empty disables trace export.
     endpoint: ""
@@ -43,6 +50,12 @@ config:
 # Override the model catalog baked into the api and worker images (config/models.yaml). When non-empty, the
 # chart creates a ConfigMap and mounts it at config.modelsFile in BOTH api and worker pods.
 models:
+  content: ""
+
+# Override the generator registry baked into the api image (config/generators.yaml): curated generator
+# repositories and the allowlist of repositories users may add. When non-empty, the chart creates a ConfigMap
+# and mounts it at config.generatorsFile in the api pod.
+generators:
   content: ""
 
 # Override the agent bundle baked into the api and worker images with an existing ConfigMap, mounted at

@@ -3,10 +3,13 @@
 
 pub mod auth;
 pub mod config;
+pub mod copilot_models;
 pub mod error;
+pub mod generators;
 pub mod github_routes;
 pub mod jobs;
 pub mod middleware;
+pub mod models;
 pub mod sse;
 pub mod state;
 pub mod view;
@@ -21,6 +24,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{middleware as mw, Json, Router};
 use bcp_agent::AgentBundle;
+use bcp_core::generators::GeneratorRegistry;
 use bcp_core::models::ModelCatalog;
 use bcp_core::{AppError, ErrorCode};
 use bcp_github::GitHubClient;
@@ -64,7 +68,8 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{id}/output", get(jobs::output))
         .route("/jobs/{id}/pull-request", post(jobs::publish))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
-        .route("/jobs/{id}/retry", post(jobs::retry));
+        .route("/jobs/{id}/retry", post(jobs::retry))
+        .route("/batches", post(jobs::create_batch));
 
     // SSE streams must not be cut by the request timeout, so they live outside that layer.
     let streaming = Router::new().route("/bounded-context/jobs/{id}/events", get(sse::events));
@@ -79,7 +84,10 @@ pub fn router(state: AppState) -> Router {
         .route("/github/repositories/{owner}/{repo}", get(github_routes::repository))
         .route("/github/repositories/{owner}/{repo}/branches", get(github_routes::branches))
         .route("/agent", get(github_routes::agent))
-        .route("/models", get(github_routes::models))
+        .route("/models", get(models::list))
+        .route("/generators", get(generators::list).post(generators::add))
+        .route("/generators/{id}", axum::routing::delete(generators::remove))
+        .route("/generators/{id}/agent", get(generators::agent_info))
         .nest("/bounded-context", jobs)
         .layer(TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, Duration::from_secs(60)))
         .merge(streaming)
@@ -109,11 +117,16 @@ pub async fn build_state(cfg: ApiConfig) -> anyhow::Result<AppState> {
     let github = GitHubClient::new(&cfg.common.github)?;
     let bundle = Arc::new(AgentBundle::load(&cfg.common.agent_bundle_dir).context("loading agent bundle")?);
     let catalog = ModelCatalog::load(&cfg.common.models_file, cfg.common.models_show_unverified)?;
+    let registry = GeneratorRegistry::load(&cfg.generators_file)?;
+    let copilot_models = match &cfg.copilot_api_url {
+        Some(url) => Some(copilot_models::CopilotModelsClient::new(url, &cfg.copilot_integration_id)?),
+        None => None,
+    };
     if bundle.manifest.placeholder {
         tracing::warn!("the agent bundle is a PLACEHOLDER — install the real agent (agent-bundle/README.md)");
     }
     tracing::info!(agent = bundle.id(), version = %bundle.version, locked_model = ?bundle.locked_model(), "agent bundle loaded");
-    Ok(AppState::new(cfg, store, github, bundle, catalog))
+    Ok(AppState::new(cfg, store, github, bundle, catalog, registry, copilot_models))
 }
 
 pub async fn serve(cfg: ApiConfig) -> anyhow::Result<()> {

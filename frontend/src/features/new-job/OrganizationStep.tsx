@@ -24,7 +24,7 @@ export function OrganizationStep({
 
   return (
     <fieldset className="space-y-3">
-      <legend className="text-base font-semibold">1. Account</legend>
+      <legend className="text-base font-semibold">2. Account</legend>
       {orgs.isPending && <Spinner label="Loading accounts…" />}
       {orgs.isError && <ErrorPanel error={orgs.error} title="Could not load your GitHub accounts" />}
       {orgs.data && orgs.data.items.length === 0 && (

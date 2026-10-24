@@ -3,7 +3,10 @@
 
 use bcp_core::domain::JobStatus;
 use bcp_core::{AppError, ErrorCode};
-use bcp_store::{CancelOutcome, NewArtifact, NewAuditEvent, NewJob, PublishOutcome, Store, StoreError};
+use bcp_store::{
+    CancelOutcome, JobFilter, JobGenerator, NewArtifact, NewAuditEvent, NewJob, NewUserGenerator, PublishOutcome,
+    Store, StoreError,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -40,6 +43,9 @@ fn new_job(user: Uuid, branch: &str) -> NewJob {
         agent_version: "abc123".into(),
         agent_placeholder: true,
         max_attempts: 2,
+        batch_id: None,
+        generator: JobGenerator::builtin("Built-in"),
+        output_paths: vec!["docs/*.md".into()],
     }
 }
 
@@ -230,4 +236,58 @@ async fn sessions_and_tokens() {
     store.store_tokens(user.id, b"enc", None, Some(b"r"), None).await.unwrap();
     assert!(store.get_tokens(user.id).await.unwrap().is_some());
     assert!(!format!("{:?}", store.get_tokens(user.id).await.unwrap()).contains("enc"));
+}
+
+#[tokio::test]
+async fn generators_batches_and_saved_generators() {
+    let Some(store) = fresh_store().await else { return };
+    let user = store.upsert_user(7, "hubot", None, None).await.unwrap();
+    let other = store.upsert_user(8, "monalisa", None, None).await.unwrap();
+
+    // The same repo/branch/model may run with different generators at once, but not twice with the same one.
+    let batch = Uuid::new_v4();
+    let mut a = new_job(user.id, "main");
+    a.batch_id = Some(batch);
+    let first = store.create_job(a.clone()).await.unwrap();
+    assert_eq!(first.batch_id, Some(batch));
+    assert_eq!(first.generator_key, "builtin");
+    assert_eq!(first.output_globs(), vec!["docs/*.md".to_owned()]);
+    assert!(matches!(store.create_job(a.clone()).await, Err(StoreError::DuplicateJob(id)) if id == first.id));
+    let mut b = a.clone();
+    b.generator = JobGenerator {
+        source: "user".into(),
+        id: Some("g1".into()),
+        name: "Acme generator".into(),
+        owner: Some("acme".into()),
+        repo: Some("generator".into()),
+        branch: Some("main".into()),
+        path: Some("bundle".into()),
+        sha: Some("f".repeat(40)),
+        key: "acme/generator#bundle".into(),
+    };
+    let second = store.create_job(b).await.unwrap();
+    assert_eq!(second.generator_owner.as_deref(), Some("acme"));
+    assert_eq!(second.generator_sha.as_deref(), Some("f".repeat(40).as_str()));
+
+    let filter = JobFilter { batch_id: Some(batch), ..Default::default() };
+    let (rows, total) = store.list_jobs(user.id, &filter, 1, 50).await.unwrap();
+    assert_eq!((rows.len(), total), (2, 2));
+    let (rows, total) = store
+        .list_jobs(user.id, &JobFilter { batch_id: Some(Uuid::new_v4()), ..Default::default() }, 1, 50)
+        .await
+        .unwrap();
+    assert_eq!((rows.len(), total), (0, 0));
+
+    // Saved generators are per user and idempotent.
+    let g =
+        NewUserGenerator { user_id: user.id, name: "Mine", owner: "acme", repo: "generator", branch: None, path: "" };
+    let saved = store.add_user_generator(g.clone()).await.unwrap();
+    let again = store.add_user_generator(NewUserGenerator { owner: "ACME", ..g.clone() }).await.unwrap();
+    assert_eq!(saved.id, again.id);
+    assert_eq!(store.list_user_generators(user.id).await.unwrap().len(), 1);
+    assert!(store.list_user_generators(other.id).await.unwrap().is_empty());
+    assert!(matches!(store.delete_user_generator(other.id, saved.id).await, Err(StoreError::NotFound)));
+    assert!(matches!(store.get_user_generator(other.id, saved.id).await, Err(StoreError::NotFound)));
+    store.delete_user_generator(user.id, saved.id).await.unwrap();
+    assert_eq!(store.count_user_generators(user.id).await.unwrap(), 0);
 }

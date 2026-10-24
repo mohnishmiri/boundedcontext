@@ -12,13 +12,13 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use base64::Engine;
-use bcp_agent::{AgentAdapter, AgentBundle, CopilotCliAdapter};
+use bcp_agent::{AgentBundle, CopilotCliAdapter};
 use bcp_api::{ApiConfig, AppState};
 use bcp_core::config::{CommonConfig, GitHubSettings};
 use bcp_core::crypto::TokenCipher;
 use bcp_github::GitHubClient;
 use bcp_store::Store;
-use bcp_worker::{Mode, Worker, WorkerConfig};
+use bcp_worker::{AdapterFactory, Mode, Worker, WorkerConfig};
 use mock_github::MockGitHub;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -54,6 +54,15 @@ flowchart LR
 DOC
 case "$mode" in unexpected*) echo "tampered" > README.md ;; esac
 echo "done"
+"#;
+
+/// Test registry: two curated generators from the mock's `genhub` repositories; users may add `genhub/*`.
+const GENERATORS_YAML: &str = r#"
+curated:
+  - { id: lite, name: Lite (curated), description: A minimal generator, owner: genhub, repo: lite }
+  - { id: ctx, name: Context analysis, owner: genhub, repo: monorepo, path: generators/ctx }
+allow: ["genhub/*"]
+max_user_generators: 2
 "#;
 
 pub fn repo_root() -> PathBuf {
@@ -101,6 +110,10 @@ impl Harness {
         let db = fresh_database().await?;
         let mock = MockGitHub::start().await;
         let url = Url::parse(&mock.url).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_work = tmp.path().join("api-work");
+        let generators_file = tmp.path().join("generators.yaml");
+        std::fs::write(&generators_file, GENERATORS_YAML).unwrap();
         let common = CommonConfig {
             database_url: db,
             database_max_connections: 8,
@@ -116,7 +129,7 @@ impl Harness {
                 private_key_pem: mock_github::test_app_key(),
             },
             cipher: TokenCipher::from_base64(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])).unwrap(),
-            agent_bundle_dir: repo_root().join("agent-bundle"),
+            agent_bundle_dir: repo_root().join("backend/tools/integration-tests/fixtures/bundle"),
             models_file: repo_root().join("config/models.yaml"),
             models_show_unverified: false,
         };
@@ -130,13 +143,18 @@ impl Harness {
             job_create_limit_per_hour: 50,
             run_migrations: true,
             job_retention_days: 90,
+            generators_file,
+            work_dir: tmp_work.clone(),
+            copilot_api_url: Some(Url::parse(&format!("{}/copilot", mock.url)).unwrap()),
+            copilot_integration_id: "copilot-developer-cli".into(),
+            batch_max_repos: 25,
         };
         let state = bcp_api::build_state(cfg).await.unwrap();
         let store = state.store.clone();
         let shutdown = CancellationToken::new();
         tokio::spawn(bcp_api::sse::run_notifier(state.clone(), shutdown.clone()));
         let app = bcp_api::router(state.clone());
-        Some(Self { mock, store, app, state, common, tmp: tempfile::tempdir().unwrap(), shutdown })
+        Some(Self { mock, store, app, state, common, tmp, shutdown })
     }
 
     /// Starts a real worker in loop mode with the scripted agent runtime.
@@ -173,9 +191,9 @@ impl Harness {
         };
         tweak(&mut cfg);
         let bundle = Arc::new(AgentBundle::load(&self.common.agent_bundle_dir).unwrap());
-        let adapter: Arc<dyn AgentAdapter> = Arc::new(CopilotCliAdapter::new(bundle.clone(), script));
+        let adapters: AdapterFactory = Arc::new(move |b| Arc::new(CopilotCliAdapter::new(b, script.clone())));
         let github = GitHubClient::new(&self.common.github).unwrap();
-        let worker = Arc::new(Worker::new(cfg, self.store.clone(), github, bundle, adapter));
+        let worker = Arc::new(Worker::new(cfg, self.store.clone(), github, bundle, adapters));
         assert!(worker.preflight().await);
         tokio::spawn(worker.clone().run_loop(self.shutdown.clone()));
         worker

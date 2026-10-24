@@ -16,15 +16,20 @@ name: bounded-context-portal
 x-backend-env: &backend-env
   BCP_DATABASE_URL: postgres://bcp:bcp@postgres:5432/bcp
   BCP_PUBLIC_URL: ${BCP_PUBLIC_URL:-http://localhost:3000}
-  # Server-side calls go to the mock by service name; the browser is redirected to the mock's host port.
-  BCP_GITHUB_API_URL: http://mock-github:9000
-  BCP_GITHUB_OAUTH_URL: http://mock-github:9000
-  BCP_GITHUB_WEB_URL: http://localhost:${BCP_MOCK_PORT:-9000}
-  BCP_GITHUB_APP_ID: "4242"
-  BCP_GITHUB_APP_SLUG: bounded-context-portal-dev
-  BCP_GITHUB_CLIENT_ID: Iv1.localdev
-  BCP_GITHUB_CLIENT_SECRET: local-dev-secret
-  BCP_GITHUB_PRIVATE_KEY_FILE: /secrets/github-app-private-key
+  # Uses real GitHub (https://api.github.com / https://github.com) by default.
+  # Supports GitHub Personal Access Token (BCP_GITHUB_PAT or GITHUB_TOKEN in .env or browser sign-in prompt).
+  BCP_GITHUB_PAT: ${BCP_GITHUB_PAT:-}
+  GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+  BCP_USE_MOCK_GITHUB: ${BCP_USE_MOCK_GITHUB:-false}
+  BCP_GITHUB_API_URL: ${BCP_GITHUB_API_URL:-http://mock-github:9000}
+  BCP_GITHUB_OAUTH_URL: ${BCP_GITHUB_OAUTH_URL:-http://mock-github:9000}
+  BCP_GITHUB_WEB_URL: ${BCP_GITHUB_WEB_URL:-http://localhost:${BCP_MOCK_PORT:-9000}}
+  BCP_GITHUB_APP_ID: ${BCP_GITHUB_APP_ID:-4242}
+  BCP_GITHUB_APP_SLUG: ${BCP_GITHUB_APP_SLUG:-bounded-context-portal-dev}
+  BCP_GITHUB_CLIENT_ID: ${BCP_GITHUB_CLIENT_ID:-Iv1.localdev}
+  BCP_GITHUB_CLIENT_SECRET: ${BCP_GITHUB_CLIENT_SECRET:-local-dev-secret}
+  BCP_GITHUB_PRIVATE_KEY: ${BCP_GITHUB_PRIVATE_KEY:-}
+  BCP_GITHUB_PRIVATE_KEY_FILE: ${BCP_GITHUB_PRIVATE_KEY_FILE:-/secrets/github-app-private-key}
   BCP_TOKEN_ENCRYPTION_KEY_FILE: /secrets/token-encryption-key
   BCP_MODELS_SHOW_UNVERIFIED: "true"
   BCP_LOG_FORMAT: pretty
@@ -73,8 +78,15 @@ services:
       BCP_RUN_MIGRATIONS: "true"
       BCP_RATE_LIMIT_PER_MINUTE: "600"
       BCP_JOB_CREATE_LIMIT_PER_HOUR: "200"
+      # Models each user can use are listed from the Copilot API when the portal talks to real GitHub. Against
+      # the mock, set this to http://mock-github:9000/copilot to exercise the live path (otherwise the catalog).
+      BCP_COPILOT_API_URL: ${BCP_COPILOT_API_URL:-}
     ports: ["127.0.0.1:${BCP_API_PORT:-8080}:8080"]
-    volumes: [devsecrets:/secrets:ro]
+    volumes:
+      - devsecrets:/secrets:ro
+      - ./agent-bundle:/opt/agent-bundle:ro
+      - ./config/models.yaml:/etc/bcp/models.yaml:ro
+      - ./config/generators.yaml:/etc/bcp/generators.yaml:ro
     depends_on:
       postgres: { condition: service_healthy }
       dev-secrets: { condition: service_completed_successfully }
@@ -84,13 +96,17 @@ services:
     build: { context: ., dockerfile: backend/Dockerfile, target: worker-dev }
     environment:
       <<: *backend-env
+      BCP_COPILOT_BIN: ${BCP_COPILOT_BIN:-/usr/local/bin/fake-copilot}
       BCP_WORKER_CONCURRENCY: "2"
       BCP_GENERATE_MAX_ATTEMPTS: "1"
     read_only: true
     tmpfs: ["/work:uid=10001,gid=10001,mode=0700", "/tmp:mode=1777", "/home/worker:uid=10001,gid=10001,mode=0700"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    volumes: [devsecrets:/secrets:ro]
+    volumes:
+      - devsecrets:/secrets:ro
+      - ./agent-bundle:/opt/agent-bundle:ro
+      - ./config/models.yaml:/etc/bcp/models.yaml:ro
     depends_on:
       api: { condition: service_started }
 

@@ -9,6 +9,12 @@ BCP_GITHUB_APP_ID: {{ .Values.config.github.appId | quote }}
 BCP_GITHUB_CLIENT_ID: {{ .Values.config.github.clientId | quote }}
 BCP_AGENT_BUNDLE_DIR: {{ .Values.config.agentBundleDir | quote }}
 BCP_MODELS_FILE: {{ .Values.config.modelsFile | quote }}
+BCP_GENERATORS_FILE: {{ .Values.config.generatorsFile | quote }}
+{{- with .Values.config.copilotApiUrl }}
+BCP_COPILOT_API_URL: {{ . | quote }}
+{{- end }}
+BCP_COPILOT_INTEGRATION_ID: {{ .Values.config.copilotIntegrationId | quote }}
+BCP_BATCH_MAX_REPOS: {{ .Values.config.batchMaxRepos | quote }}
 BCP_MODELS_SHOW_UNVERIFIED: {{ .Values.config.modelsShowUnverified | quote }}
 BCP_LOG_FORMAT: {{ .Values.config.logFormat | quote }}
 RUST_LOG: {{ .Values.config.rustLog | quote }}
@@ -68,4 +74,16 @@ metadata:
 data:
   models.yaml: |
     {{- .Values.models.content | nindent 4 }}
+{{- end }}
+{{- if .Values.generators.content }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bcp.fullname" . }}-generators
+  labels:
+    {{- include "bcp.labels" . | nindent 4 }}
+data:
+  generators.yaml: |
+    {{- .Values.generators.content | nindent 4 }}
 {{- end }}

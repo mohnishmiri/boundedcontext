@@ -47,3 +47,24 @@ prompt comes from `bundle.yaml`, and only files matching `output.paths` are ever
 | MCP servers configured in VS Code | Not available | Add `mcp.json` + `runtime.mcp_config` |
 | `model:` in frontmatter | Overrides the model chosen in the UI | The portal locks the model selector and says why |
 | Interactive follow-up questions | Disabled (`--no-ask-user`) | Put required answers in `inputs` |
+
+## Generator repositories (bundles outside the image)
+
+Besides this built-in bundle, the portal can run a bundle that lives in a GitHub repository (see
+`config/generators.yaml` and `docs/architecture.md`). Such a repository needs the same two things as this
+directory, at the repository root or in a sub-directory (`path` when adding it):
+
+```
+<path>/bundle.yaml            # the manifest described above
+<path>/agents/<id>.agent.md   # the agent files, verbatim (or beside the manifest, see agents_dir)
+```
+
+If your agent already lives in a folder such as `aifc-archetype-generator/orchestrate.agent.md` with prompt files
+next to it, put `bundle.yaml` in that folder and add `agents_dir: "."` at its top level, so the existing layout
+is copied unchanged into the agent home.
+
+Bundles loaded from repositories always run under the portal's hard limits, regardless of `runtime:` — shell,
+url and memory tools are denied, MCP servers are not available, repository instructions are off — and
+`output.paths` must be documentation files (`md`, `mdx`, `txt`, `yaml`, `yml`, `json`) below a `docs` directory
+(`docs/*.md`, `**/docs/archetypes/*.yaml`, …). A bundle that asks for more (MCP servers, `.github/**`, source
+files) is rejected with `generator_invalid` and an explanation.
