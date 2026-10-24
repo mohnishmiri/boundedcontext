@@ -320,7 +320,15 @@ pub fn collect_outputs(
         Some(p) => files.iter().find(|f| f.path == p).map(|f| f.path.clone()).ok_or_else(|| {
             AppError::new(ErrorCode::OutputMissing, format!("The agent did not write {p}.")).retryable(false)
         })?,
-        None => files[0].path.clone(),
+        None => files
+            .iter()
+            .find(|f| {
+                let lower = f.path.to_ascii_lowercase();
+                lower.contains("bounded-context") || lower.contains("bounded_context")
+            })
+            .unwrap_or(&files[0])
+            .path
+            .clone(),
     };
     let primary_file = files.iter().find(|f| f.path == primary).expect("primary is in files");
     let meaningful = primary_file.new_content.trim().len() as u64;

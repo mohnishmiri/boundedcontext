@@ -68,6 +68,14 @@ published_port() { compose port "$1" "$2" 2>/dev/null | sed 's/.*://' | head -n1
 
 running() { [ -n "$(compose ps --status running -q "$1" 2>/dev/null)" ]; }
 
+# ---- environment (.env) --------------------------------------------------------------------------------------
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.env"
+  set +a
+fi
+
 # ---- ports ---------------------------------------------------------------------------------------------------
 if [ "$FRESH" = 1 ]; then
   info "Removing containers, database and dev secrets (--fresh)"
@@ -140,7 +148,11 @@ fi
 row() { printf '  %-13s %-42s %s\n' "$1" "$2" "${3:-}"; }
 printf '\n%s\n\n' "${GREEN}${BOLD}Bounded Context Portal is running${RESET}"
 row "Portal" "http://localhost:$UI_PORT" "open in your browser"
-row "Mock GitHub" "http://localhost:$MOCK_PORT" "sign in as octocat (push access) or viewer (read-only)"
+if [ -n "${BCP_GITHUB_CLIENT_ID:-}" ] && [ "${BCP_GITHUB_CLIENT_ID}" != "Iv1.localdev" ]; then
+  row "GitHub Auth" "${BCP_GITHUB_WEB_URL:-https://github.com}" "real GitHub OAuth (${BCP_GITHUB_CLIENT_ID})"
+else
+  row "Mock GitHub" "http://localhost:$MOCK_PORT" "sign in as octocat (push access) or viewer (read-only)"
+fi
 row "API" "http://localhost:$API_PORT" "/readyz, /api/…"
 row "PostgreSQL" "postgres://bcp:bcp@localhost:$PG_PORT/bcp"
 cat <<EOF

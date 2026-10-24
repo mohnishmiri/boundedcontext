@@ -38,7 +38,21 @@ pub struct GhPermissions {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct GhOwner {
+    #[serde(default)]
+    pub id: i64,
     pub login: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct GhOrg {
+    pub id: i64,
+    pub login: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

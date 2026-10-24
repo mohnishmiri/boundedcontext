@@ -1,0 +1,99 @@
+# 03-SERVICE-MANIFEST.yaml — Field Reference Schema
+
+Every field should cite its source file/line as a trailing YAML comment,
+e.g. `# src: service/pom.xml:12`
+
+```yaml
+service:
+  name:            # artifact ID or short name  # src: pom.xml
+  display_name:    # human-readable name
+  artifact_id:     # Maven artifactId           # src: pom.xml
+  version:         # current version            # src: pom.xml
+  last_validated:  # ISO date this manifest was last verified against code
+  description:     # one-line purpose statement
+
+ownership:
+  team:            # owning team name
+  domain:          # OMNI/ATTCC domain (e.g. Sales Enabler)
+  subdomain:       # functional subdomain
+  apm_id:          # APM application ID         # src: pom.xml or README
+  criticality:     # high / medium / low
+  sox_in_scope:    # true / false
+
+compliance:
+  sox_in_scope:             # true / false
+  sox_controls_implemented: # list of control IDs, or "none"
+  pii_data:                 # true / false
+  pii_masking_enforced:     # true / false
+  data_retention_days:      # number or "not defined"
+  audit_trail_immutable:    # true / false
+
+tech_stack:
+  language:          # e.g. Java
+  language_version:  # e.g. 8              # src: pom.xml <java.version>
+  framework:         # e.g. AJSC / Jersey  # src: pom.xml
+  framework_version: # e.g. 2.x            # src: pom.xml
+  build_tool:        # e.g. Maven 3.x      # src: pom.xml
+  runtime:           # e.g. JRE 8
+  rest_layer:        # e.g. JAX-RS / Jersey
+  persistence:
+    - name:    # e.g. Oracle
+      version: # driver version            # src: pom.xml
+    - name:    # e.g. MongoDB
+      version:
+  messaging:
+    event_hub:     # true / false
+    service_bus:   # true / false
+    framework:     # e.g. azure-messaging-eventhubs
+
+ingress:
+  # One entry per ingress KIND GROUP (not per individual route)
+  - kind:      # REST | EventHub | ServiceBus | Scheduled
+    base_path: # for REST: base @Path; for messaging: hub/queue name
+    auth:      # JWT+AAF/CADI | none | internal-only
+    active:    # true / false (false = class body commented out)
+    endpoints: # for REST only — list of { method, path, description }
+      - method: GET
+        path:   /example
+        description: returns example
+
+egress:
+  - kind:    # ServiceBus | EventHub | Blob | HTTP
+    name:    # queue/hub/container name
+    purpose: # one-line description
+    active:  # true / false
+
+dependencies:
+  # External services / libraries worth calling out
+  - name:        # e.g. OracleDAO
+    type:        # internal | external | library
+    criticality: # high / medium / low
+    version:     # if applicable
+
+quality_gate:
+  coverage:          # unit test line/branch coverage %   # src: jacoco report or pom.xml
+  mutation:          # mutation score % or "not run"
+  sonar_reliability: # A–E rating or "unknown"
+  sonar_security:    # A–E rating or "unknown"
+  sonar_maintainability: # A–E rating or "unknown"
+  sonar_issues:      # count or "unknown"
+  veracode_policy:   # Pass / Fail / "not run"
+  veracode_findings: # count of open flaws or "unknown"
+  sca_findings:      # count of SCA vulnerabilities or "unknown"
+
+aifc:
+  omni_domain:           # e.g. Sales Enabler
+  tier1_rules:           # reference to global rule set version
+  tier2_rules:           # reference to domain rule set
+  tier3_rules:           # path to 09-tier3-service-rules.md
+  tier3_rules_reconciled: # true / false
+  memories_seed:         # path to 10-service-memories-seed.md
+  canary_status:         # SE-CANARY-OK | missing | stale
+
+open_gaps:
+  # Pulled from the Gap Register in _archetype-evidence.md
+  - id:       # GAP-N
+    desc:     # one-line description
+    severity: # high / medium / low
+    status:   # open / resolved
+```

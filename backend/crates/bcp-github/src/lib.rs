@@ -68,7 +68,7 @@ pub struct GitHubClient {
     app_id: String,
     client_id: String,
     client_secret: String,
-    app_key: EncodingKey,
+    app_key: Option<EncodingKey>,
 }
 
 impl std::fmt::Debug for GitHubClient {
@@ -86,8 +86,14 @@ enum Auth<'a> {
 
 impl GitHubClient {
     pub fn new(settings: &GitHubSettings) -> anyhow::Result<Self> {
-        let app_key = EncodingKey::from_rsa_pem(settings.private_key_pem.as_bytes())
-            .map_err(|e| anyhow::anyhow!("GitHub App private key is not a valid RSA PEM: {e}"))?;
+        let app_key = if !settings.app_id.is_empty() && !settings.private_key_pem.is_empty() {
+            Some(
+                EncodingKey::from_rsa_pem(settings.private_key_pem.as_bytes())
+                    .map_err(|e| anyhow::anyhow!("GitHub App private key is not a valid RSA PEM: {e}"))?,
+            )
+        } else {
+            None
+        };
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("bounded-context-portal"));
         headers.insert("X-GitHub-Api-Version", HeaderValue::from_static("2022-11-28"));
@@ -111,6 +117,10 @@ impl GitHubClient {
         })
     }
 
+    pub fn has_app(&self) -> bool {
+        self.app_key.is_some()
+    }
+
     pub fn web_url(&self) -> &Url {
         &self.web_url
     }
@@ -127,9 +137,11 @@ impl GitHubClient {
             exp: i64,
             iss: &'a str,
         }
+        let app_key =
+            self.app_key.as_ref().ok_or_else(|| GitHubError::Io("GitHub App private key is not configured".into()))?;
         let now = Utc::now().timestamp();
         let claims = Claims { iat: now - 60, exp: now + 540, iss: &self.app_id };
-        jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &self.app_key)
+        jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, app_key)
             .map_err(|e| GitHubError::Io(format!("signing App JWT: {e}")))
     }
 
@@ -244,13 +256,18 @@ impl GitHubClient {
 
     pub fn authorize_url(&self, redirect_uri: &str, state: &str, code_challenge: &str) -> Url {
         let mut url = self.web_url.join("login/oauth/authorize").expect("valid URL");
-        url.query_pairs_mut()
-            .append_pair("client_id", &self.client_id)
-            .append_pair("redirect_uri", redirect_uri)
-            .append_pair("state", state)
-            .append_pair("code_challenge", code_challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("allow_signup", "false");
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("client_id", &self.client_id)
+                .append_pair("redirect_uri", redirect_uri)
+                .append_pair("state", state)
+                .append_pair("code_challenge", code_challenge)
+                .append_pair("code_challenge_method", "S256")
+                .append_pair("allow_signup", "false");
+            if !self.has_app() && !self.client_id.starts_with("Iv") {
+                qp.append_pair("scope", "repo read:org");
+            }
+        }
         url
     }
 
@@ -339,6 +356,23 @@ impl GitHubClient {
         url.query_pairs_mut().append_pair("per_page", "100");
         self.get_paginated("installation_repositories", url, Auth::Token(token), max_pages, |p: Page| p.repositories)
             .await
+    }
+
+    pub async fn list_user_orgs(&self, token: &str) -> Result<Vec<GhOrg>> {
+        let mut url = self.api("user/orgs");
+        url.query_pairs_mut().append_pair("per_page", "100");
+        let (items, _) = self.get_paginated("user_orgs", url, Auth::Token(token), 10, |p: Vec<GhOrg>| p).await?;
+        Ok(items)
+    }
+
+    /// Repositories accessible to the authenticated user (personal, collaborator, and organization repos).
+    pub async fn list_user_repos(&self, token: &str, max_pages: usize) -> Result<(Vec<GhRepo>, bool)> {
+        let mut url = self.api("user/repos");
+        url.query_pairs_mut()
+            .append_pair("per_page", "100")
+            .append_pair("sort", "updated")
+            .append_pair("affiliation", "owner,collaborator,organization_member");
+        self.get_paginated("user_repos", url, Auth::Token(token), max_pages, |p: Vec<GhRepo>| p).await
     }
 
     pub async fn get_repository(&self, token: &str, owner: &str, repo: &str) -> Result<GhRepo> {

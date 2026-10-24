@@ -104,22 +104,49 @@ impl std::fmt::Debug for GitHubSettings {
 }
 
 impl GitHubSettings {
+    pub fn pat_from_env() -> Option<String> {
+        env_secret("BCP_GITHUB_PAT").ok().flatten().or_else(|| env_opt("GITHUB_TOKEN"))
+    }
+
     pub fn from_env() -> Result<Self> {
-        let api_url = parse_url("BCP_GITHUB_API_URL", &env_or("BCP_GITHUB_API_URL", "https://api.github.com"))?;
-        let web_url = parse_url("BCP_GITHUB_WEB_URL", &env_or("BCP_GITHUB_WEB_URL", "https://github.com"))?;
-        let oauth_url = match env_opt("BCP_GITHUB_OAUTH_URL") {
-            Some(v) => parse_url("BCP_GITHUB_OAUTH_URL", &v)?,
-            None => web_url.clone(),
+        let client_id = env_or("BCP_GITHUB_CLIENT_ID", "");
+        let client_secret = env_secret("BCP_GITHUB_CLIENT_SECRET")?.unwrap_or_default();
+        let use_mock = env_bool("BCP_USE_MOCK_GITHUB", false)?;
+
+        let raw_api_url = env_or("BCP_GITHUB_API_URL", "https://api.github.com");
+        let api_url = if !use_mock && raw_api_url == "http://mock-github:9000" {
+            parse_url("BCP_GITHUB_API_URL", "https://api.github.com")?
+        } else {
+            parse_url("BCP_GITHUB_API_URL", &raw_api_url)?
         };
+
+        let raw_web_url = env_or("BCP_GITHUB_WEB_URL", "https://github.com");
+        let web_url = if !use_mock && raw_web_url.starts_with("http://localhost:") {
+            parse_url("BCP_GITHUB_WEB_URL", "https://github.com")?
+        } else {
+            parse_url("BCP_GITHUB_WEB_URL", &raw_web_url)?
+        };
+
+        let oauth_url = match env_opt("BCP_GITHUB_OAUTH_URL") {
+            Some(v) if !(!use_mock && v == "http://mock-github:9000") => parse_url("BCP_GITHUB_OAUTH_URL", &v)?,
+            _ => web_url.clone(),
+        };
+
+        let raw_app_id = env_or("BCP_GITHUB_APP_ID", "");
+        let app_id = if !use_mock && raw_app_id == "4242" { String::new() } else { raw_app_id };
+
+        let private_key_pem =
+            if app_id.is_empty() { String::new() } else { env_secret("BCP_GITHUB_PRIVATE_KEY")?.unwrap_or_default() };
+
         Ok(Self {
             api_url,
             web_url,
             oauth_url,
-            app_id: env_req("BCP_GITHUB_APP_ID")?,
+            app_id,
             app_slug: env_or("BCP_GITHUB_APP_SLUG", "bounded-context-portal"),
-            client_id: env_req("BCP_GITHUB_CLIENT_ID")?,
-            client_secret: env_secret_req("BCP_GITHUB_CLIENT_SECRET")?,
-            private_key_pem: env_secret_req("BCP_GITHUB_PRIVATE_KEY")?,
+            client_id,
+            client_secret,
+            private_key_pem,
         })
     }
 }

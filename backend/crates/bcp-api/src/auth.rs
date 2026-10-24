@@ -83,11 +83,130 @@ struct OAuthState {
 #[derive(Deserialize)]
 pub struct LoginQuery {
     return_to: Option<String>,
+    token: Option<String>,
 }
 
-/// `GET /api/auth/github` — starts the OAuth flow.
+fn token_login_page(return_to: &str, error_msg: Option<&str>) -> Response {
+    let err_banner = match error_msg {
+        Some(msg) => format!(
+            r#"<div style="background:#ffebe9;border:1px solid #ff818266;color:#cf222e;padding:12px 16px;border-radius:6px;margin-bottom:16px;font-size:14px;">{msg}</div>"#
+        ),
+        None => String::new(),
+    };
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in with GitHub Token · Bounded Context Portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: #f6f8fa; color: #1f2328; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 16px; box-sizing: border-box; }}
+    .card {{ background: #ffffff; border: 1px solid #d0d7de; border-radius: 8px; max-width: 440px; width: 100%; padding: 28px; box-shadow: 0 4px 12px rgba(31,35,40,0.06); }}
+    h1 {{ font-size: 20px; font-weight: 600; margin: 0 0 8px; }}
+    p {{ font-size: 14px; color: #59636e; line-height: 1.5; margin: 0 0 18px; }}
+    label {{ display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }}
+    input[type="password"] {{ width: 100%; padding: 8px 12px; font-size: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid #d0d7de; border-radius: 6px; box-sizing: border-box; margin-bottom: 16px; }}
+    input[type="password"]:focus {{ outline: 2px solid #0969da; border-color: #0969da; }}
+    button {{ width: 100%; background: #1f883d; color: #ffffff; border: 1px solid rgba(31,35,40,0.15); border-radius: 6px; padding: 9px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }}
+    button:hover {{ background: #1a7f37; }}
+    .hint {{ margin-top: 16px; padding-top: 14px; border-top: 1px solid #d8dee4; font-size: 12px; color: #59636e; line-height: 1.5; }}
+    code {{ background: #eff1f3; padding: 2px 5px; border-radius: 4px; font-size: 12px; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Sign in with GitHub Token</h1>
+    <p>Enter your GitHub Personal Access Token (<code>ghp_…</code> or <code>github_pat_…</code>) to sign in to your real GitHub account, repositories, and branches.</p>
+    {err_banner}
+    <form method="GET" action="/api/auth/github">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <label for="gh-token">GitHub Personal Access Token</label>
+      <input id="gh-token" name="token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" required autofocus autocomplete="off">
+      <button type="submit">Sign in with GitHub</button>
+    </form>
+    <div class="hint">
+      <strong>Tip:</strong> You can also set <code>BCP_GITHUB_PAT=ghp_…</code> in your <code>.env</code> file to sign in automatically without this prompt.
+    </div>
+  </div>
+</body>
+</html>"#
+    );
+    (StatusCode::OK, [(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))], html)
+        .into_response()
+}
+
+async fn sign_in_with_pat(state: &AppState, access_token: String, return_to: &str) -> Response {
+    let gh_user = match state.github.get_authenticated_user(&access_token).await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(error = %e, "GitHub token sign-in failed");
+            return token_login_page(
+                return_to,
+                Some("GitHub rejected that token. Check that your token is valid and has 'repo' access."),
+            );
+        }
+    };
+    let tokens = bcp_github::TokenResponse {
+        access_token,
+        token_type: Some("bearer".into()),
+        scope: None,
+        expires_in: None,
+        refresh_token: None,
+        refresh_token_expires_in: None,
+    };
+    let result: Result<Response, AppError> = async {
+        let user = state
+            .store
+            .upsert_user(gh_user.id, &gh_user.login, gh_user.name.as_deref(), gh_user.avatar_url.as_deref())
+            .await?;
+        state.tokens.save(user.id, &tokens).await?;
+        let session_id = random_token(32);
+        let expires =
+            Utc::now() + chrono::Duration::from_std(state.cfg.session_ttl).unwrap_or(chrono::Duration::hours(12));
+        state.store.create_session(&sha256(session_id.as_bytes()), user.id, expires).await?;
+        state
+            .store
+            .audit_best_effort(NewAuditEvent {
+                actor_user_id: Some(user.id),
+                actor_login: Some(&user.login),
+                action: actions::USER_SIGNED_IN,
+                request_id: Some(&current_request_id()),
+                ..Default::default()
+            })
+            .await;
+        let mut resp = Redirect::to(return_to).into_response();
+        resp.headers_mut().append(
+            header::SET_COOKIE,
+            cookie(state, SESSION_COOKIE, &session_id, "/", state.cfg.session_ttl.as_secs() as i64),
+        );
+        Ok(resp)
+    }
+    .await;
+    result.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "completing token sign-in failed");
+        auth_failure(state, "internal")
+    })
+}
+
+/// `GET /api/auth/github` — starts the OAuth flow or signs in with a GitHub Personal Access Token.
 pub async fn login(State(state): State<AppState>, ApiQuery(q): ApiQuery<LoginQuery>) -> Response {
     let return_to = q.return_to.as_deref().and_then(validate::return_to_path).unwrap_or("/").to_owned();
+    if let Some(tok) = q
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(bcp_core::config::GitHubSettings::pat_from_env)
+    {
+        return sign_in_with_pat(&state, tok, &return_to).await;
+    }
+    let cid = state.cfg.common.github.client_id.as_str();
+    let is_real_github = state.github.web_url().host_str() == Some("github.com");
+    if is_real_github && (cid.is_empty() || cid == "Iv1.localdev") {
+        return token_login_page(&return_to, None);
+    }
     let st = OAuthState {
         state: random_token(24),
         verifier: random_token(48),
