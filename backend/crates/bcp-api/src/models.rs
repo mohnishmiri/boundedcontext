@@ -9,6 +9,7 @@ use axum::Json;
 use bcp_core::models::ModelEntry;
 use bcp_core::{validate, AppError, ErrorCode};
 use serde_json::{json, Value};
+use url::Url;
 use uuid::Uuid;
 
 use crate::auth::CurrentUser;
@@ -80,7 +81,12 @@ pub async fn model_list(state: &AppState, user_id: Uuid, token: &str) -> Arc<Mod
     };
     let list = match &state.copilot_models {
         None => catalog_list(None),
-        Some(client) => match client.list(token).await {
+        Some(client) => {
+            let account_base = match state.github.get_copilot_user(token).await {
+                Ok(u) => crate::copilot_models::account_api_base(&u),
+                Err(_) => None,
+            };
+            match client.list(token, account_base.as_ref()).await {
             Ok(live) => {
                 let mut items: Vec<ModelEntry> = Vec::with_capacity(live.len() + 1);
                 // `auto` (Copilot picks) is a Copilot CLI feature, not a listed model.
@@ -96,7 +102,7 @@ pub async fn model_list(state: &AppState, user_id: Uuid, token: &str) -> Arc<Mod
                 ModelList { items, source: ModelSource::Copilot, warning: None, default_model }
             }
             Err(e) => {
-                tracing::warn!(%user_id, error = %e, "live Copilot model list unavailable; using the catalog");
+                tracing::warn!(%user_id, error = %e, endpoint = ?account_base.as_ref().map(Url::as_str), "live Copilot model list unavailable; using the catalog");
                 metrics::counter!("bcp_model_list_fallback_total").increment(1);
                 catalog_list(Some(
                     "Could not load the models available to your GitHub Copilot account, so this is the portal's \
@@ -104,7 +110,8 @@ pub async fn model_list(state: &AppState, user_id: Uuid, token: &str) -> Arc<Mod
                         .to_owned(),
                 ))
             }
-        },
+            }
+        }
     };
     let list = Arc::new(list);
     state.cache.put(key, list.clone());
@@ -113,7 +120,8 @@ pub async fn model_list(state: &AppState, user_id: Uuid, token: &str) -> Arc<Mod
 
 /// `GET /api/models`
 pub async fn list(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
-    let token = state.tokens.access_token(user.user.id).await?;
+    // The account that runs Copilot decides which models are available.
+    let token = state.tokens.copilot_run_token(user.user.id).await?;
     let list = model_list(&state, user.user.id, &token).await;
     let items: Vec<Value> = list
         .items

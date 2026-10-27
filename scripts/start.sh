@@ -76,6 +76,26 @@ if [ -f "$ROOT/.env" ]; then
   set +a
 fi
 
+# Accept Windows paths in Git Bash, including paths previously placed in the base64 setting.
+if [ -z "${BCP_CA_CERT_FILE:-}" ] && [ -n "${BCP_CA_CERT_BASE64:-}" ]; then
+  BCP_CA_CERT_FILE=$BCP_CA_CERT_BASE64
+fi
+if [ -n "${BCP_CA_CERT_FILE:-}" ]; then
+  ca_cert_file=$BCP_CA_CERT_FILE
+  if command -v cygpath >/dev/null 2>&1; then
+    ca_cert_file=$(cygpath -u "$BCP_CA_CERT_FILE")
+    BCP_CA_CERT_FILE=$(cygpath -m "$BCP_CA_CERT_FILE")
+  fi
+  [ -r "$ca_cert_file" ] || die "Cannot read corporate CA certificate file: $BCP_CA_CERT_FILE"
+  export BCP_CA_CERT_FILE
+fi
+
+# Each job runs Copilot with the requester's own sign-in token, so credits are billed to that user. A shared
+# BCP_COPILOT_GITHUB_TOKEN overrides this for every job; it is never filled in automatically.
+if [ -n "${BCP_COPILOT_GITHUB_TOKEN:-}" ]; then
+  warn "BCP_COPILOT_GITHUB_TOKEN is set: every job will use that one Copilot account instead of the requester's."
+fi
+
 # ---- ports ---------------------------------------------------------------------------------------------------
 if [ "$FRESH" = 1 ]; then
   info "Removing containers, database and dev secrets (--fresh)"
@@ -110,7 +130,8 @@ export BCP_PUBLIC_URL="http://localhost:$UI_PORT"
 
 # ---- start ---------------------------------------------------------------------------------------------------
 if [ "$ALREADY_UP" = 1 ] && [ "$BUILD" = 0 ]; then
-  info "The stack is already running."
+  info "The stack is already running; applying configuration changes."
+  compose up -d --remove-orphans
 else
   if [ "$BUILD" = 1 ]; then
     info "Building images from the current sources…"
@@ -138,10 +159,11 @@ else
     done
     printf '%s\n' "${GREEN}ready${RESET}"
   }
-  wait_for "API" curl -fsS "http://localhost:$API_PORT/readyz"
+  # Corporate HTTP(S)_PROXY settings must not capture the local health checks.
+  wait_for "API" curl -fsS --noproxy '*' "http://127.0.0.1:$API_PORT/readyz"
   wait_for "worker" compose exec -T worker node -e \
     "fetch('http://127.0.0.1:8081/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-  wait_for "UI" curl -fsS "http://localhost:$UI_PORT/healthz"
+  wait_for "UI" curl -fsS --noproxy '*' "http://127.0.0.1:$UI_PORT/healthz"
 fi
 
 # ---- summary -------------------------------------------------------------------------------------------------

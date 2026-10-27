@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use bcp_agent::workspace::{capture_base_outputs, collect_outputs, extract_tarball, snapshot, ExtractLimits};
-use bcp_agent::{AgentAdapter, AgentBundle, AgentError, AgentRunRequest, Secret};
+use bcp_agent::{AgentAdapter, AgentBundle, AgentError, AgentRunRequest, Secret, UsageSummary};
 use bcp_core::domain::{ChangeType, GenerationStage, JobStatus};
 use bcp_core::generators::GeneratorRepo;
 use bcp_core::redact::Redactor;
@@ -240,6 +240,20 @@ impl Worker {
         let inputs: BTreeMap<String, String> = serde_json::from_value(job.inputs.clone()).unwrap_or_default();
         let timeout =
             std::time::Duration::from_secs(bundle.manifest.runtime.timeout_secs).min(self.cfg.max_job_timeout);
+        let copilot_token = match &self.cfg.copilot_token {
+            Some(shared) => shared.clone(),
+            None => Secret::new(guard(ctl, self.tokens.copilot_run_token(job.user_id)).await?),
+        };
+        drop(token);
+        if copilot_token.expose().starts_with("ghp_") {
+            return Err(Outcome::Failed(AppError::new(
+                ErrorCode::CopilotUnauthorized,
+                "Copilot does not accept classic personal access tokens (ghp_), so this job cannot run on your \
+                 Copilot credits. Add a Copilot token in the portal (a fine-grained token with only the 'Copilot \
+                 Requests' permission; no organisation approval needed), then retry.",
+            )));
+        }
+        let usage_dir = agent_dir.clone();
         let req = AgentRunRequest {
             workspace: workspace.clone(),
             scratch_dir: agent_dir,
@@ -249,12 +263,28 @@ impl Worker {
             repo: job.repo.clone(),
             branch: job.base_branch.clone(),
             sha: sha.clone(),
-            copilot_token: Secret::new(token),
+            copilot_token,
             timeout,
         };
+        if self.cfg.copilot_token.is_some() {
+            log.info("Using the worker's configured Copilot token (BCP_COPILOT_GITHUB_TOKEN) for the agent").await;
+        }
         let agent_started = Instant::now();
         let outcome = adapter.run(req, log, ctl.run.clone()).await;
         metrics::histogram!("bcp_agent_run_seconds").record(agent_started.elapsed().as_secs_f64());
+        // Recorded for failed and timed-out runs too: they still consumed Copilot requests.
+        if let Some(mut run_usage) = UsageSummary::read(&usage_dir) {
+            run_usage.shared_token = self.cfg.copilot_token.is_some();
+            log.info(&run_usage.describe()).await;
+            let mut total: UsageSummary =
+                job.agent_usage.clone().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+            total.merge(&run_usage);
+            if let Ok(v) = serde_json::to_value(&total) {
+                if let Err(e) = store.set_job_usage(job.id, &v).await {
+                    tracing::warn!(error = %e, "failed to record agent usage");
+                }
+            }
+        }
         let outcome = match outcome {
             Ok(o) => o,
             Err(AgentError::Cancelled) => return Err(ctl.stop_reason()),

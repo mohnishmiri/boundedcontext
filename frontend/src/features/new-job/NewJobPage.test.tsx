@@ -368,7 +368,7 @@ describe('New generation', () => {
     expect(bodies[0].model).toBe('claude-haiku-4.5');
   });
 
-  it('shows the fallback warning when the model list is a static catalog', async () => {
+  it('does not show a warning when the model list is a static catalog', async () => {
     server.use(
       http.get('/api/models', () =>
         HttpResponse.json({
@@ -379,8 +379,8 @@ describe('New generation', () => {
       ),
     );
     renderApp('/jobs/new');
-    expect(await screen.findByText('Could not read your Copilot models; showing a default list.')).toBeInTheDocument();
-    expect(screen.getByLabelText('4. Model')).toBeEnabled();
+    expect(await screen.findByLabelText('4. Model')).toBeEnabled();
+    expect(screen.queryByText(/showing a default list/)).not.toBeInTheDocument();
   });
 
   it('does not show a model warning for the user’s own Copilot models', async () => {

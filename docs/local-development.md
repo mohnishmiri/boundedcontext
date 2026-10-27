@@ -19,6 +19,14 @@ scripts/stop.sh           # stop; data is kept
 picks free alternatives (it prints which); force them with `BCP_UI_PORT`, `BCP_API_PORT`, `BCP_PG_PORT`,
 `BCP_MOCK_PORT`. Plain `docker compose up --build` also works with the default ports.
 
+If Docker image builds fail with `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` while downloading npm packages on a
+TLS-inspected corporate network, set `BCP_CA_CERT_FILE` in `.env` to the PEM root CA path and rebuild with
+`scripts/start.sh --build`. The script passes it as a BuildKit secret rather than a build argument. The Rust,
+worker, and frontend build stages add it to their trusted CA bundles, and the API and worker images keep it so
+they can reach GitHub at runtime; TLS verification remains enabled. Direct `docker compose` builds also use the
+path from
+`BCP_CA_CERT_FILE` in `.env`.
+
 Open the portal URL it prints (normally <http://localhost:3000>) and sign in. The **mock GitHub** (http://localhost:9000) shows an account chooser:
 
 | Account | Can see | Push access |

@@ -13,11 +13,13 @@ const JOB_COLUMNS: &str = r#"
     j.model, j.inputs, j.can_push, j.retry_of, j.status, j.stage, j.stage_times, j.base_sha, j.agent_id,
     j.agent_version, j.agent_placeholder, j.cli_version, j.error_code, j.error_message, j.error_retryable,
     j.cancel_requested, j.output_primary, j.publish_status, j.publish_stage, j.publish_stage_times,
-    j.publish_requested_by, j.publish_branch, j.publish_commit_sha, j.publish_pr_number, j.publish_pr_url,
+    j.publish_requested_by, j.publish_title, j.publish_central, j.publish_branch, j.publish_commit_sha,
+    j.publish_pr_number, j.publish_pr_url, j.central_publish_branch, j.central_publish_commit_sha,
+    j.central_publish_pr_number, j.central_publish_pr_url,
     j.publish_error_code, j.publish_error_message, j.publish_error_retryable, j.publish_updated_at,
     j.created_at, j.started_at, j.finished_at, j.updated_at, j.batch_id, j.generator_source, j.generator_id,
     j.generator_name, j.generator_owner, j.generator_repo, j.generator_branch, j.generator_path, j.generator_sha,
-    j.generator_key, j.output_paths
+    j.generator_key, j.output_paths, j.agent_usage
 "#;
 
 #[derive(Debug, Clone, FromRow)]
@@ -51,10 +53,16 @@ pub struct JobRow {
     pub publish_stage: Option<String>,
     pub publish_stage_times: Value,
     pub publish_requested_by: Option<Uuid>,
+    pub publish_title: Option<String>,
+    pub publish_central: bool,
     pub publish_branch: Option<String>,
     pub publish_commit_sha: Option<String>,
     pub publish_pr_number: Option<i32>,
     pub publish_pr_url: Option<String>,
+    pub central_publish_branch: Option<String>,
+    pub central_publish_commit_sha: Option<String>,
+    pub central_publish_pr_number: Option<i32>,
+    pub central_publish_pr_url: Option<String>,
     pub publish_error_code: Option<String>,
     pub publish_error_message: Option<String>,
     pub publish_error_retryable: Option<bool>,
@@ -74,6 +82,7 @@ pub struct JobRow {
     pub generator_sha: Option<String>,
     pub generator_key: String,
     pub output_paths: Value,
+    pub agent_usage: Option<Value>,
 }
 
 /// Which generator (agent bundle) a job runs. `builtin` has no repository.
@@ -207,10 +216,15 @@ pub enum PublishOutcome {
 /// Fields the publish pipeline persists step by step so a retry resumes instead of repeating.
 #[derive(Debug, Default, Clone)]
 pub struct PublishProgress {
+    pub title: Option<String>,
     pub branch: Option<String>,
     pub commit_sha: Option<String>,
     pub pr_number: Option<i32>,
     pub pr_url: Option<String>,
+    pub central_branch: Option<String>,
+    pub central_commit_sha: Option<String>,
+    pub central_pr_number: Option<i32>,
+    pub central_pr_url: Option<String>,
 }
 
 impl Store {
@@ -493,6 +507,15 @@ impl Store {
         Ok(())
     }
 
+    pub async fn set_job_usage(&self, job_id: Uuid, usage: &Value) -> Result<()> {
+        sqlx::query("UPDATE jobs SET agent_usage = $2, updated_at = now() WHERE id = $1")
+            .bind(job_id)
+            .bind(usage)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Stores the generated artifacts and marks the job succeeded, atomically.
     pub async fn complete_job(
         &self,
@@ -596,6 +619,8 @@ impl Store {
         job_id: Uuid,
         max_attempts: i32,
         stage_times: &Value,
+        title: &str,
+        publish_central: bool,
     ) -> Result<PublishOutcome> {
         let mut tx = self.pool.begin().await?;
         let row: Option<(Uuid, String, String)> =
@@ -617,14 +642,17 @@ impl Store {
             return Ok(PublishOutcome::Unchanged(job));
         }
         sqlx::query(
-            "UPDATE jobs SET publish_status = 'queued', publish_stage = 'queued', publish_stage_times = $3,
+                "UPDATE jobs SET publish_status = 'queued', publish_stage = 'queued', publish_stage_times = $3,
                     publish_requested_by = $2, publish_error_code = NULL, publish_error_message = NULL,
-                    publish_error_retryable = NULL, publish_updated_at = now(), updated_at = now()
+                    publish_error_retryable = NULL, publish_title = $4, publish_central = $5,
+                    publish_updated_at = now(), updated_at = now()
               WHERE id = $1",
         )
         .bind(job_id)
         .bind(user_id)
         .bind(stage_times)
+        .bind(title)
+        .bind(publish_central)
         .execute(&mut *tx)
         .await?;
         sqlx::query("INSERT INTO job_tasks (id, job_id, kind, max_attempts) VALUES ($1, $2, 'publish', $3)")
@@ -655,18 +683,28 @@ impl Store {
     /// Persists whichever publish results are set; `None` fields are left unchanged.
     pub async fn save_publish_progress(&self, job_id: Uuid, p: &PublishProgress) -> Result<()> {
         sqlx::query(
-            "UPDATE jobs SET publish_branch = coalesce($2, publish_branch),
-                    publish_commit_sha = coalesce($3, publish_commit_sha),
-                    publish_pr_number = coalesce($4, publish_pr_number),
-                    publish_pr_url = coalesce($5, publish_pr_url),
+                "UPDATE jobs SET publish_title = coalesce($2, publish_title),
+                    publish_branch = coalesce($3, publish_branch),
+                    publish_commit_sha = coalesce($4, publish_commit_sha),
+                    publish_pr_number = coalesce($5, publish_pr_number),
+                    publish_pr_url = coalesce($6, publish_pr_url),
+                    central_publish_branch = coalesce($7, central_publish_branch),
+                    central_publish_commit_sha = coalesce($8, central_publish_commit_sha),
+                    central_publish_pr_number = coalesce($9, central_publish_pr_number),
+                    central_publish_pr_url = coalesce($10, central_publish_pr_url),
                     publish_updated_at = now(), updated_at = now()
               WHERE id = $1",
         )
         .bind(job_id)
+        .bind(&p.title)
         .bind(&p.branch)
         .bind(&p.commit_sha)
         .bind(p.pr_number)
         .bind(&p.pr_url)
+        .bind(&p.central_branch)
+        .bind(&p.central_commit_sha)
+        .bind(p.central_pr_number)
+        .bind(&p.central_pr_url)
         .execute(&self.pool)
         .await?;
         Ok(())

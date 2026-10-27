@@ -75,7 +75,7 @@ components:
     JobStatus: { type: string, enum: [queued, running, succeeded, failed, cancelled] }
     GenerationStage: { type: string, enum: [queued, preparing, fetching_repository, running_agent, validating_output, completed] }
     PublishStatus: { type: string, enum: [not_started, queued, running, succeeded, failed] }
-    PublishStage: { type: string, enum: [queued, checking_base, creating_commit, creating_branch, creating_pull_request, completed] }
+    PublishStage: { type: string, enum: [queued, checking_base, creating_commit, creating_branch, creating_pull_request, checking_central_base, creating_central_commit, creating_central_branch, creating_central_pull_request, completed] }
     StepState: { type: string, enum: [pending, active, done, failed, skipped] }
     ChangeType: { type: string, enum: [added, modified, deleted] }
     Step:
@@ -194,12 +194,45 @@ components:
                     properties:
                       path: { type: string }
                       change_type: { $ref: '#/components/schemas/ChangeType' }
+            usage:
+              type: [object, 'null']
+              description: Copilot usage summed over the job's agent runs (failed and timed-out runs included).
+              properties:
+                runs: { type: integer }
+                premium_requests: { type: number }
+                api_duration_ms: { type: integer }
+                input_tokens: { type: integer }
+                output_tokens: { type: integer }
+                cache_read_tokens: { type: integer }
+                cache_write_tokens: { type: integer }
+                reasoning_tokens: { type: integer }
+                models:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      model: { type: string }
+                      requests: { type: integer }
+                      premium_requests: { type: number }
+                      input_tokens: { type: integer }
+                      output_tokens: { type: integer }
+                      cache_read_tokens: { type: integer }
+                      cache_write_tokens: { type: integer }
+                      reasoning_tokens: { type: integer }
             publish:
               type: object
               properties:
                 status: { $ref: '#/components/schemas/PublishStatus' }
                 stage: { oneOf: [{ $ref: '#/components/schemas/PublishStage' }, { type: 'null' }] }
                 steps: { type: array, items: { $ref: '#/components/schemas/Step' } }
+                title: { type: [string, 'null'] }
+                central_available: { type: boolean }
+                central_requested: { type: boolean }
+                central_repo: { type: [string, 'null'] }
+                central_branch: { type: [string, 'null'] }
+                central_commit_sha: { type: [string, 'null'] }
+                central_pr_number: { type: [integer, 'null'] }
+                central_pr_url: { type: [string, 'null'] }
                 branch: { type: [string, 'null'] }
                 commit_sha: { type: [string, 'null'] }
                 commit_url: { type: [string, 'null'] }
@@ -660,6 +693,17 @@ paths:
     post:
       summary: Publish as branch + commit + pull request (idempotent)
       parameters: [{ $ref: '#/components/parameters/JobId' }, { $ref: '#/components/parameters/CsrfHeader' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 256 }
+                publish_central: { type: boolean, default: false }
       responses:
         '202': { description: Publishing queued, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
         '200': { description: Already queued, running or done, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }

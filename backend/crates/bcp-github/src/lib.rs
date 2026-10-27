@@ -329,6 +329,11 @@ impl GitHubClient {
         self.get_json("user", self.api("user"), Auth::Token(token)).await
     }
 
+    /// Copilot plan and budget of the token's user (internal endpoint used by Copilot clients).
+    pub async fn get_copilot_user(&self, token: &str) -> Result<serde_json::Value> {
+        self.get_json("copilot_user", self.api("copilot_internal/user"), Auth::Token(token)).await
+    }
+
     pub async fn list_user_installations(&self, token: &str) -> Result<Vec<GhInstallation>> {
         #[derive(serde::Deserialize)]
         struct Page {

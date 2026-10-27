@@ -86,7 +86,13 @@ async fn audit(state: &AppState, user: &CurrentUser, action: &str, job: &JobRow,
 pub(crate) async fn job_json(state: &AppState, job: &JobRow) -> Result<Value, AppError> {
     let artifacts =
         if job.status() == JobStatus::Succeeded { state.store.list_artifacts(job.id).await? } else { Vec::new() };
-    Ok(view::job(job, &artifacts, state.github.web_url().as_str()))
+    let central_repo = state
+        .cfg
+        .common
+        .central_repository
+        .as_ref()
+        .map(|(owner, repo)| format!("{owner}/{repo}"));
+    Ok(view::job(job, &artifacts, state.github.web_url().as_str(), central_repo.as_deref()))
 }
 
 /// Everything about a request that is the same for every repository in it: the chosen generator, the validated
@@ -123,6 +129,17 @@ async fn prepare_with(
     raw_inputs: &BTreeMap<String, String>,
     batch_id: Option<Uuid>,
 ) -> Result<RequestContext, AppError> {
+    if !state.cfg.copilot_shared_token
+        && token.starts_with("ghp_")
+        && state.tokens.copilot_token(user.user.id).await?.is_none()
+    {
+        return Err(AppError::new(
+            ErrorCode::CopilotUnauthorized,
+            "Generation runs on your own Copilot credits, and Copilot does not accept classic tokens (ghp_). \
+             Add a Copilot token (banner at the top of the page) - a fine-grained token with only the 'Copilot \
+             Requests' permission, which needs no organisation approval.",
+        ));
+    }
     let model = match generator.bundle.locked_model() {
         Some(locked) if model != locked => {
             return Err(AppError::new(
@@ -132,7 +149,10 @@ async fn prepare_with(
             .with_details(json!({ "locked_model": locked })))
         }
         Some(locked) => locked.to_owned(),
-        None => models::model_list(state, user.user.id, &token).await.validate(model)?.id.clone(),
+        None => {
+            let copilot = state.tokens.copilot_run_token(user.user.id).await?;
+            models::model_list(state, user.user.id, &copilot).await.validate(model)?.id.clone()
+        }
     };
     let inputs = generator.bundle.validate_inputs(raw_inputs)?;
     Ok(RequestContext { token, generator, model, inputs, batch_id })
@@ -434,14 +454,35 @@ pub async fn output(State(state): State<AppState>, user: CurrentUser, Path(id): 
     Ok(resp)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishRequest {
+    pub title: String,
+    #[serde(default)]
+    pub publish_central: bool,
+}
+
 /// `POST /api/bounded-context/jobs/{id}/pull-request`
-pub async fn publish(State(state): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> ApiResult<Response> {
+pub async fn publish(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<PublishRequest>,
+) -> ApiResult<Response> {
     let job = state.store.get_user_job(user.user.id, parse_job_id(&id)?).await?;
     if job.status() != JobStatus::Succeeded {
         return Err(AppError::conflict("Only a successfully generated job can be published.").into());
     }
     if matches!(job.publish_status(), PublishStatus::Queued | PublishStatus::Running | PublishStatus::Succeeded) {
         return Ok((StatusCode::OK, Json(job_json(&state, &job).await?)).into_response());
+    }
+    let title = req.title.trim();
+    if title.is_empty() || title.len() > 256 || title.chars().any(char::is_control) {
+        return Err(AppError::validation([(
+            "title",
+            "Enter a pull request title of 1 to 256 characters without control characters.",
+        )])
+        .into());
     }
     let token = state.tokens.access_token(user.user.id).await?;
     let repo = state.github.get_repository(&token, &job.owner, &job.repo).await.map_err(|e| e.to_user_error())?;
@@ -452,12 +493,57 @@ pub async fn publish(State(state): State<AppState>, user: CurrentUser, Path(id):
         )
         .into());
     }
+    if req.publish_central {
+        let Some((central_owner, central_repo)) = state.cfg.common.central_repository.as_ref() else {
+            return Err(AppError::conflict("Central repository publishing is not configured.").into());
+        };
+        if central_owner.eq_ignore_ascii_case(&job.owner) && central_repo.eq_ignore_ascii_case(&job.repo) {
+            return Err(AppError::conflict("The central repository cannot also be the source repository.").into());
+        }
+        let central = state
+            .github
+            .get_repository(&token, central_owner, central_repo)
+            .await
+            .map_err(|e| e.to_user_error())?;
+        if !central.permissions().push {
+            return Err(AppError::new(
+                ErrorCode::RepositoryAccessDenied,
+                "You need write access to the central repository to open its pull request.",
+            )
+            .into());
+        }
+        if state.github.has_app() {
+            state
+                .github
+                .get_repository_installation(central_owner, central_repo)
+                .await
+                .map_err(|e| e.to_user_error())?;
+        }
+    }
     if !state.store.list_artifacts(job.id).await?.iter().any(|a| a.allowed) {
         return Err(AppError::conflict("This job produced nothing that can be published.").into());
     }
-    match state.store.request_publish(user.user.id, job.id, DEFAULT_PUBLISH_ATTEMPTS, &json!({})).await? {
+    match state
+        .store
+        .request_publish(
+            user.user.id,
+            job.id,
+            DEFAULT_PUBLISH_ATTEMPTS,
+            &json!({}),
+            title,
+            req.publish_central,
+        )
+        .await?
+    {
         PublishOutcome::Queued(job) => {
-            audit(&state, &user, actions::PUBLISH_REQUESTED, &job, json!({})).await;
+            audit(
+                &state,
+                &user,
+                actions::PUBLISH_REQUESTED,
+                &job,
+                json!({ "title": title, "publish_central": req.publish_central }),
+            )
+            .await;
             Ok((StatusCode::ACCEPTED, Json(job_json(&state, &job).await?)).into_response())
         }
         PublishOutcome::Unchanged(job) => Ok((StatusCode::OK, Json(job_json(&state, &job).await?)).into_response()),

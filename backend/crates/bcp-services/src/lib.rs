@@ -30,6 +30,10 @@ fn refresh_aad(user_id: Uuid) -> Vec<u8> {
     format!("github-refresh:{user_id}").into_bytes()
 }
 
+fn copilot_aad(user_id: Uuid) -> Vec<u8> {
+    format!("copilot-access:{user_id}").into_bytes()
+}
+
 fn expiry(now: DateTime<Utc>, secs: Option<i64>) -> Option<DateTime<Utc>> {
     secs.filter(|s| *s > 0).map(|s| now + Duration::seconds(s))
 }
@@ -45,6 +49,37 @@ impl TokenService {
 
     pub fn github(&self) -> &GitHubClient {
         &self.github
+    }
+
+    pub async fn save_copilot_token(&self, user_id: Uuid, token: &str) -> Result<(), AppError> {
+        let enc = self.cipher.encrypt_str(token, &copilot_aad(user_id));
+        self.store.set_copilot_token(user_id, &enc).await?;
+        Ok(())
+    }
+
+    pub async fn delete_copilot_token(&self, user_id: Uuid) -> Result<(), AppError> {
+        self.store.delete_copilot_token(user_id).await?;
+        Ok(())
+    }
+
+    /// The user's dedicated Copilot token, if they saved one.
+    pub async fn copilot_token(&self, user_id: Uuid) -> Result<Option<String>, AppError> {
+        let Some(enc) = self.store.get_copilot_token(user_id).await? else { return Ok(None) };
+        match self.cipher.decrypt_string(&enc, &copilot_aad(user_id)) {
+            Ok(t) => Ok(Some(t)),
+            Err(_) => {
+                tracing::error!(%user_id, "stored Copilot token could not be decrypted (key rotated?)");
+                Ok(None)
+            }
+        }
+    }
+
+    /// The token Copilot runs with for this user: their dedicated Copilot token, else their sign-in token.
+    pub async fn copilot_run_token(&self, user_id: Uuid) -> Result<String, AppError> {
+        match self.copilot_token(user_id).await? {
+            Some(t) => Ok(t),
+            None => self.access_token(user_id).await,
+        }
     }
 
     /// Persists tokens from an OAuth code exchange or refresh.

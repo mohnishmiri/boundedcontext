@@ -48,7 +48,7 @@ worker:
   image: { tag: dev }
   replicas: 1
   env:
-    BCP_MAX_JOB_TIMEOUT_SECS: "1800"
+    BCP_MAX_JOB_TIMEOUT_SECS: "18000"
     BCP_MAX_REPO_BYTES: "262144000"
     BCP_MAX_REPO_FILES: "50000"
     BCP_TASK_LEASE_SECS: "60"

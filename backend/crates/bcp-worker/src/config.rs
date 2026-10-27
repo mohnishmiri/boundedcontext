@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use bcp_core::config::{env_opt, env_or, env_parse, CommonConfig};
+use bcp_agent::Secret;
+use bcp_core::config::{env_opt, env_or, env_parse, env_secret, CommonConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -23,6 +24,8 @@ pub struct WorkerConfig {
     pub worker_id: String,
     pub work_dir: PathBuf,
     pub copilot_bin: PathBuf,
+    /// Shared Copilot CLI credential; when unset each job uses the requesting user's GitHub token.
+    pub copilot_token: Option<Secret>,
     pub max_job_timeout: Duration,
     pub max_repo_bytes: u64,
     pub max_repo_files: u64,
@@ -56,7 +59,8 @@ impl WorkerConfig {
                 .unwrap_or_else(|| format!("worker-{}", uuid::Uuid::new_v4().simple())),
             work_dir: env_or("BCP_WORK_DIR", "/tmp/bcp-work").into(),
             copilot_bin: env_or("BCP_COPILOT_BIN", "copilot").into(),
-            max_job_timeout: Duration::from_secs(env_parse("BCP_MAX_JOB_TIMEOUT_SECS", 3600)?),
+            copilot_token: env_secret("BCP_COPILOT_GITHUB_TOKEN")?.map(Secret::new),
+            max_job_timeout: Duration::from_secs(env_parse("BCP_MAX_JOB_TIMEOUT_SECS", 18000)?),
             max_repo_bytes: env_parse("BCP_MAX_REPO_BYTES", 500 * 1024 * 1024)?,
             max_repo_files: env_parse("BCP_MAX_REPO_FILES", 100_000)?,
             lease_secs,

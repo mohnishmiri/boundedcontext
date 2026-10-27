@@ -1,0 +1,28 @@
+version: "2.0"
+skill: omni-document
+category: aifc-loop
+lifecycle_phase: document
+description: Mode registry for omni-document (AIFC Core Loop Step 6). Adding a mode = a `modes:` entry + a `references/mode-*.md` file.
+
+mode_selection:
+  flag: "--mode <name>"
+  precedence: [explicit_flag, keyword_triggers, arg_pattern, default, ask]
+  default: default
+  on_ambiguous: ask_user_question
+
+modes:
+  readme:
+    reference: references/mode-readme.md
+    summary: "README/AGENTS.md generation and updates"
+    triggers: [README, "AGENTS.md", readme]
+  docs:
+    reference: references/mode-docs.md
+    summary: "Documentation sync, frontmatter, change log"
+    triggers: [docs, documentation, sync, frontmatter, "change log"]
+  aid:
+    reference: references/mode-aid.md
+    summary: "Application Interface Document generation"
+    triggers: [AID, aid, "application interface", "interface document"]
+  default:
+    reference: references/mode-default.md
+    summary: "General documentation"

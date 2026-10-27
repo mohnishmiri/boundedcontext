@@ -10,6 +10,10 @@ export const handlers = [
   http.get('/api/generators/:id/agent', () => HttpResponse.json(f.agent)),
   http.get('/api/agent', () => HttpResponse.json(f.agent)),
   http.get('/api/models', () => HttpResponse.json(f.models)),
+  http.get('/api/copilot/quota', () => HttpResponse.json({ available: false, message: 'n/a' })),
+  http.get('/api/copilot/token', () =>
+    HttpResponse.json({ configured: false, sign_in_token_classic: false, shared: false, needed: false }),
+  ),
   http.get('/api/github/organizations', () => HttpResponse.json(f.organizations)),
   http.get('/api/github/repositories', ({ request }) => {
     const url = new URL(request.url);

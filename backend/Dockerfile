@@ -18,7 +18,16 @@ ARG NODE_VERSION=22
 # ---------------------------------------------------------------------------------------------------------
 FROM rust:${RUST_VERSION}-bookworm AS build
 WORKDIR /src/backend
+# Part of the cache key, so toggling the corporate CA rebuilds the trust store (secret contents are not).
+ARG CORPORATE_CA_CERT_ENABLED
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates-extra.crt \
+    CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates-extra.crt
 COPY backend/ ./
+RUN --mount=type=secret,id=corporate_ca,required=false \
+    cp /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates-extra.crt \
+ && if [ "$CORPORATE_CA_CERT_ENABLED" = "1" ]; then \
+      cat /run/secrets/corporate_ca >> /etc/ssl/certs/ca-certificates-extra.crt; \
+     fi
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/backend/target,sharing=locked \
     cargo build --release --locked \
@@ -30,6 +39,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # ---------------------------------------------------------------------------------------------------------
 # API: static-ish Rust binary on distroless (glibc + CA certificates, no shell, non-root).
 FROM gcr.io/distroless/cc-debian12:nonroot AS api
+COPY --from=build /etc/ssl/certs/ca-certificates-extra.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/bcp-api /usr/local/bin/bcp-api
 # The API reads the agent bundle (GET /api/agent, input validation, model lock) and the model catalog.
 COPY agent-bundle/ /opt/agent-bundle/
@@ -50,9 +60,17 @@ CMD ["serve"]
 # processes killed by the worker are reaped instead of accumulating as zombies.
 FROM node:${NODE_VERSION}-bookworm-slim AS worker
 ARG COPILOT_CLI_VERSION
-RUN apt-get update \
+ARG CORPORATE_CA_CERT_ENABLED
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates-extra.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates-extra.crt
+RUN --mount=type=secret,id=corporate_ca,required=false \
+    apt-get update \
  && apt-get install -y --no-install-recommends tini ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
+ && cp /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates-extra.crt \
+ && if [ "$CORPORATE_CA_CERT_ENABLED" = "1" ]; then \
+      cat /run/secrets/corporate_ca >> /etc/ssl/certs/ca-certificates-extra.crt; \
+    fi \
  && npm install -g --omit=dev --no-audit --no-fund "@github/copilot@${COPILOT_CLI_VERSION}" \
  && npm cache clean --force \
  && groupadd --gid 10001 worker \

@@ -15,7 +15,9 @@ prompt comes from `bundle.yaml`, and only files matching `output.paths` are ever
 2. Edit `bundle.yaml`:
    - `agent.id` → the new file name without `.agent.md` (e.g. `BoundedContext`).
    - `prompt.template` → the exact prompt developers type in VS Code. Keep `{{output_path}}` only if the
-     prompt in VS Code names the output file; otherwise remove it.
+     prompt in VS Code names the output file; otherwise remove it. `{{workspace}}` is the absolute path of the
+     checked-out repository and `{{agent_dir}}` the absolute, read-only folder holding the agent files (and
+     anything copied next to them, such as `prompts/`).
    - `output.paths` / `output.primary` → where the agent writes (glob patterns allowed, e.g.
      `docs/bounded-contexts/*.md`). Leave `primary` out if the agent picks file names itself.
    - `inputs` → only values the agent truly cannot discover itself. Delete the placeholder `scope_path`

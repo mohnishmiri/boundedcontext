@@ -101,7 +101,7 @@ backups (point-in-time restore).
 | `model_unavailable` | Model not enabled for the user/org, or not in the catalog | Choose another model; fix `config/models.yaml`. |
 | `model_locked_by_agent` | The agent file pins a model | Expected; the UI shows the lock. |
 | `rate_limited` (job) | Copilot quota / premium requests exhausted, or the per-hour job limit | Wait; consider another model. |
-| `agent_timeout` | Run exceeded `runtime.timeout_secs` / `BCP_MAX_JOB_TIMEOUT_SECS` | Large monorepo: use the scope input or raise the limit. |
+| `agent_timeout` | Run exceeded `runtime.timeout_secs` / `BCP_MAX_JOB_TIMEOUT_SECS` (default maximum: 5 hours per repository job) | Large monorepo: use the scope input or raise both limits; for KEDA, keep `activeDeadlineSeconds` above the worker limit plus shutdown grace. |
 | `agent_failed` | Non-zero exit of the CLI | Read the job log (redacted CLI output). |
 | `agent_unavailable` | CLI missing or cannot reach Copilot | Check worker readiness and egress (§4 of the setup guide). |
 | `output_missing` / `output_empty` / `output_invalid` / `output_too_large` | The agent did not write the expected file, or it was unusable | Compare with VS Code behaviour; check `output.paths` in `bundle.yaml`. |

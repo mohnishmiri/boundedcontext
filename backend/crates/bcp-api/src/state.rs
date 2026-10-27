@@ -105,4 +105,8 @@ impl TtlCache {
         }
         map.insert(key, (Instant::now(), value));
     }
+
+    pub fn remove(&self, key: &str) {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
 }

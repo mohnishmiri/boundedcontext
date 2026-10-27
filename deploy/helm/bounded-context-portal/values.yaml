@@ -45,7 +45,8 @@ config:
     # OTLP gRPC endpoint, e.g. http://otel-collector.monitoring:4317. Empty disables trace export.
     endpoint: ""
   # Extra non-secret env vars added to every component's ConfigMap.
-  extraEnv: {}
+  extraEnv:
+    BCP_CENTRAL_REPO: ATT-DP1/apm0014313-ragaflow-ai-context-docs
 
 # Override the model catalog baked into the api and worker images (config/models.yaml). When non-empty, the
 # chart creates a ConfigMap and mounts it at config.modelsFile in BOTH api and worker pods.
@@ -189,7 +190,7 @@ worker:
   # Tasks processed concurrently per pod (BCP_WORKER_CONCURRENCY). Also KEDA's target per replica.
   concurrency: 1
   env:
-    BCP_MAX_JOB_TIMEOUT_SECS: "3600"
+    BCP_MAX_JOB_TIMEOUT_SECS: "18000"
     BCP_MAX_REPO_BYTES: "524288000"
     BCP_MAX_REPO_FILES: "100000"
     BCP_TASK_LEASE_SECS: "60"
@@ -222,7 +223,7 @@ worker:
     successfulJobsHistoryLimit: 5
     failedJobsHistoryLimit: 10
     # Hard stop for one Job pod: BCP_MAX_JOB_TIMEOUT_SECS + grace.
-    activeDeadlineSeconds: 3900
+    activeDeadlineSeconds: 18600
     ttlSecondsAfterFinished: 3600
   # HPA fallback when keda.enabled=false (loop mode only).
   autoscaling:

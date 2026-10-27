@@ -16,6 +16,7 @@ struct Args {
     agent: Option<String>,
     model: Option<String>,
     share: Option<PathBuf>,
+    usage_file: Option<PathBuf>,
     version: bool,
 }
 
@@ -34,6 +35,7 @@ fn parse_args(argv: &[String]) -> Args {
             "--agent" => a.agent = value(),
             "--model" => a.model = value(),
             "--share" => a.share = value().map(PathBuf::from),
+            "--usage-output-file" => a.usage_file = value().map(PathBuf::from),
             "--allow-tool" | "--deny-tool" | "--disable-mcp-server" | "--log-dir" | "--additional-mcp-config" => {
                 let _ = value();
             }
@@ -2279,6 +2281,14 @@ fn main() -> ExitCode {
 
     if let Some(share) = args.share {
         let _ = std::fs::write(share, format!("# Transcript\n\nPrompt:\n\n{prompt}\n"));
+    }
+    if let Some(path) = args.usage_file {
+        let model = args.model.as_deref().unwrap_or("fake-model");
+        let input = 1000 + prompt.len() as u64;
+        let usage = format!(
+            r#"{{"totalPremiumRequestCost":1,"totalNanoAiu":2500000000,"totalApiDurationMs":1200,"modelMetrics":{{"{model}":{{"requests":{{"count":3,"cost":1}},"totalNanoAiu":2500000000,"usage":{{"inputTokens":{input},"outputTokens":850,"cacheReadTokens":400,"cacheWriteTokens":0,"reasoningTokens":0}}}}}}}}"#
+        );
+        let _ = std::fs::write(path, usage);
     }
     ExitCode::SUCCESS
 }

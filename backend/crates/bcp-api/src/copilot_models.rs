@@ -82,19 +82,19 @@ struct RawBilling {
 impl CopilotModelsClient {
     pub fn new(base: &Url, integration_id: &str) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build()?;
-        let mut url = base.clone();
-        url.path_segments_mut()
-            .map_err(|()| anyhow::anyhow!("Copilot API URL cannot be a base"))?
-            .pop_if_empty()
-            .push("models");
-        Ok(Self { http, url, integration_id: integration_id.to_owned() })
+        Ok(Self { http, url: models_url(base)?, integration_id: integration_id.to_owned() })
     }
 
-    /// Chat models the token's account can use, in the order Copilot lists them.
-    pub async fn list(&self, token: &str) -> Result<Vec<ModelEntry>, ModelListError> {
+    /// Chat models the token's account can use, in the order Copilot lists them. `base` overrides the configured
+    /// Copilot API URL (business/enterprise accounts are served from their own host).
+    pub async fn list(&self, token: &str, base: Option<&Url>) -> Result<Vec<ModelEntry>, ModelListError> {
+        let url = match base {
+            Some(b) => models_url(b).map_err(|e| ModelListError::Decode(e.to_string()))?,
+            None => self.url.clone(),
+        };
         let resp = self
             .http
-            .get(self.url.clone())
+            .get(url)
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(ACCEPT, "application/json")
             .header(USER_AGENT, "bounded-context-portal")
@@ -145,6 +145,25 @@ pub fn parse_models(body: &[u8]) -> Result<Vec<ModelEntry>, ModelListError> {
     Ok(out)
 }
 
+fn models_url(base: &Url) -> anyhow::Result<Url> {
+    let mut url = base.clone();
+    url.path_segments_mut()
+        .map_err(|()| anyhow::anyhow!("Copilot API URL cannot be a base"))?
+        .pop_if_empty()
+        .push("models");
+    Ok(url)
+}
+
+/// The account's own Copilot API host from `copilot_internal/user` (`endpoints.api`), e.g.
+/// `https://api.business.githubcopilot.com`. Only https hosts under githubcopilot.com are accepted, so the
+/// user's token is never sent anywhere else.
+pub fn account_api_base(copilot_user: &serde_json::Value) -> Option<Url> {
+    let url = Url::parse(copilot_user.get("endpoints")?.get("api")?.as_str()?).ok()?;
+    let host = url.host_str()?;
+    let trusted = host == "githubcopilot.com" || host.ends_with(".githubcopilot.com");
+    (url.scheme() == "https" && trusted && url.port().is_none()).then_some(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +193,21 @@ mod tests {
         assert!(matches!(parse_models(br#"{"data": []}"#), Err(ModelListError::Empty)));
         assert!(matches!(parse_models(b"<html>"), Err(ModelListError::Decode(_))));
         assert_eq!(parse_models(br#"[{"id": "gpt-5"}]"#).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn account_api_base_only_trusts_githubcopilot_hosts() {
+        let ok = serde_json::json!({ "endpoints": { "api": "https://api.business.githubcopilot.com" } });
+        let url = account_api_base(&ok).unwrap();
+        assert_eq!(models_url(&url).unwrap().as_str(), "https://api.business.githubcopilot.com/models");
+        for bad in [
+            "http://api.business.githubcopilot.com",
+            "https://evil.example.com",
+            "https://githubcopilot.com.evil.example",
+            "https://api.githubcopilot.com:8443",
+        ] {
+            assert!(account_api_base(&serde_json::json!({ "endpoints": { "api": bad } })).is_none(), "{bad}");
+        }
+        assert!(account_api_base(&serde_json::json!({})).is_none());
     }
 }

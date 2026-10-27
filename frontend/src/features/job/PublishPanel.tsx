@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
@@ -19,14 +20,21 @@ function regenerateLink(job: Job): string {
 
 export function PublishPanel({ job }: { job: Job }) {
   const qc = useQueryClient();
+  const p = job.publish;
+  const [title, setTitle] = useState(p.title ?? '');
+  const [publishCentral, setPublishCentral] = useState(p.central_requested);
   const publish = useMutation({
-    mutationFn: () => api.requestPullRequest(job.id),
+    mutationFn: (body: { title: string; publish_central: boolean }) => api.requestPullRequest(job.id, body),
     onSuccess: (next) => qc.setQueryData(queryKeys.job(job.id), next),
   });
-  const p = job.publish;
   const prUrl = safeExternalUrl(p.pr_url);
+  const centralPrUrl = safeExternalUrl(p.central_pr_url);
   const commitUrl = safeExternalUrl(p.commit_url);
   const brUrl = p.branch ? branchUrl(job.repository_url, p.branch) : undefined;
+  const submitPublish = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    publish.mutate({ title: title.trim(), publish_central: publishCentral });
+  };
 
   return (
     <section aria-labelledby="publish-heading" className="space-y-4">
@@ -42,9 +50,37 @@ export function PublishPanel({ job }: { job: Job }) {
               containing only the generated files, and opens a pull request against{' '}
               <code className="font-mono">{job.base_branch}</code>. It is never merged automatically.
             </p>
-            <Button onClick={() => publish.mutate()} loading={publish.isPending}>
-              Create pull request
-            </Button>
+            <form onSubmit={submitPublish} className="space-y-3">
+              <label className="block space-y-1 text-sm font-medium" htmlFor="publish-title">
+                <span>Pull request title</span>
+                <input
+                  id="publish-title"
+                  name="title"
+                  required
+                  maxLength={256}
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-normal text-gray-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+                  placeholder="APM-123: Update bounded context documentation"
+                />
+              </label>
+              {p.central_available && (
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={publishCentral}
+                    onChange={(event) => setPublishCentral(event.target.checked)}
+                    className="mt-1 h-4 w-4 accent-indigo-600"
+                  />
+                  <span>
+                    Also create a pull request in <code className="font-mono">{p.central_repo}</code>
+                  </span>
+                </label>
+              )}
+              <Button type="submit" disabled={!title.trim()} loading={publish.isPending}>
+                Create pull request
+              </Button>
+            </form>
           </div>
         ) : (
           <Alert tone="info">
@@ -66,6 +102,13 @@ export function PublishPanel({ job }: { job: Job }) {
               <li>
                 <a href={prUrl} target="_blank" rel="noopener noreferrer" className={linkClass}>
                   Open pull request{p.pr_number ? ` #${p.pr_number}` : ''}
+                </a>
+              </li>
+            )}
+            {centralPrUrl && (
+              <li>
+                <a href={centralPrUrl} target="_blank" rel="noopener noreferrer" className={linkClass}>
+                  Open central repository pull request{p.central_pr_number ? ` #${p.central_pr_number}` : ''}
                 </a>
               </li>
             )}
@@ -106,7 +149,12 @@ export function PublishPanel({ job }: { job: Job }) {
             </Link>
           ) : (
             job.can_publish && (
-              <Button variant="secondary" onClick={() => publish.mutate()} loading={publish.isPending}>
+              <Button
+                variant="secondary"
+                disabled={!title.trim()}
+                onClick={() => publish.mutate({ title: title.trim(), publish_central: publishCentral })}
+                loading={publish.isPending}
+              >
                 Try publishing again
               </Button>
             )

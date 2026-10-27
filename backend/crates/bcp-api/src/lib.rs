@@ -4,12 +4,14 @@
 pub mod auth;
 pub mod config;
 pub mod copilot_models;
+pub mod copilot_token;
 pub mod error;
 pub mod generators;
 pub mod github_routes;
 pub mod jobs;
 pub mod middleware;
 pub mod models;
+pub mod quota;
 pub mod sse;
 pub mod state;
 pub mod view;
@@ -85,6 +87,11 @@ pub fn router(state: AppState) -> Router {
         .route("/github/repositories/{owner}/{repo}/branches", get(github_routes::branches))
         .route("/agent", get(github_routes::agent))
         .route("/models", get(models::list))
+        .route("/copilot/quota", get(quota::quota))
+        .route(
+            "/copilot/token",
+            get(copilot_token::status).post(copilot_token::save).delete(copilot_token::remove),
+        )
         .route("/generators", get(generators::list).post(generators::add))
         .route("/generators/{id}", axum::routing::delete(generators::remove))
         .route("/generators/{id}/agent", get(generators::agent_info))

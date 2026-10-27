@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 
-import type { Job } from '../../api/types';
+import type { Job, JobUsage } from '../../api/types';
 import { PublishBadge, StatusBadge } from '../../components/StatusBadge';
 import { formatDateTime, formatDuration, safeExternalUrl, shortSha } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
@@ -13,6 +13,46 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
       <dt className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{label}</dt>
       <dd className="mt-0.5 text-sm">{children}</dd>
     </div>
+  );
+}
+
+const count = new Intl.NumberFormat();
+
+function UsageDetails({ usage }: { usage: JobUsage }) {
+  return (
+    <section aria-label="Copilot usage" className="rounded-md border border-gray-200 p-3 dark:border-gray-700">
+      <h2 className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+        Copilot usage{usage.runs > 1 ? ` (${usage.runs} runs)` : ''}
+      </h2>
+      <dl className="mt-2 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        {usage.ai_credits !== undefined && usage.ai_credits > 0 && (
+          <Field label="AI credits (est.)">{usage.ai_credits.toFixed(2)}</Field>
+        )}
+        <Field label="Premium requests">{count.format(usage.premium_requests)}</Field>
+        <Field label="Input tokens">{count.format(usage.input_tokens)}</Field>
+        <Field label="Output tokens">{count.format(usage.output_tokens)}</Field>
+        <Field label="Cache read / write">
+          {count.format(usage.cache_read_tokens)} / {count.format(usage.cache_write_tokens)}
+        </Field>
+        <Field label="API time">{formatDuration(usage.api_duration_ms)}</Field>
+      </dl>
+      {usage.models.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-xs text-gray-600 dark:text-gray-300">
+          {usage.models.map((m) => (
+            <li key={m.model}>
+              <span className="font-mono">{m.model}</span>: {count.format(m.requests)} requests,{' '}
+              {count.format(m.input_tokens)} in / {count.format(m.output_tokens)} out
+              {m.reasoning_tokens > 0 && `, ${count.format(m.reasoning_tokens)} reasoning`}
+            </li>
+          ))}
+        </ul>
+      )}
+      {usage.shared_token && (
+        <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+          Billed to the portal&apos;s shared Copilot account, not the requester&apos;s own budget.
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -63,6 +103,7 @@ export function JobHeader({ job, live }: { job: Job; live: boolean }) {
         <Field label="Created">{formatDateTime(job.created_at)}</Field>
         <Field label={job.status === 'running' ? 'Elapsed' : 'Duration'}>{formatDuration(duration)}</Field>
       </dl>
+      {job.usage && <UsageDetails usage={job.usage} />}
       <p className="text-xs text-gray-500 dark:text-gray-400">
         Job <span className="font-mono">{job.short_id}</span>
         {' · agent '}<span className="font-mono">{job.agent.id}</span>{' '}

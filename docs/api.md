@@ -51,7 +51,8 @@ type GenerationStage = "queued" | "preparing" | "fetching_repository" | "running
                      | "validating_output" | "completed";
 type PublishStatus = "not_started" | "queued" | "running" | "succeeded" | "failed";
 type PublishStage = "queued" | "checking_base" | "creating_commit" | "creating_branch"
-                  | "creating_pull_request" | "completed";
+                  | "creating_pull_request" | "checking_central_base" | "creating_central_commit"
+                  | "creating_central_branch" | "creating_central_pull_request" | "completed";
 type StepState = "pending" | "active" | "done" | "failed" | "skipped";
 
 type Step = { key: string; label: string; state: StepState; started_at: string | null; finished_at: string | null };
@@ -98,10 +99,26 @@ type Job = JobSummary & {
     files: { path: string; change_type: "added" | "modified"; size_bytes: number }[];
     unexpected_changes: { path: string; change_type: "added" | "modified" | "deleted" }[]; // never committed
   };
+  // Copilot usage from the CLI's --usage-output-file, summed over the job's agent runs (failed/timed-out runs
+  // included); null until a run reports usage.
+  usage: null | { runs: number; premium_requests: number; api_duration_ms: number;
+                  input_tokens: number; output_tokens: number; cache_read_tokens: number;
+                  cache_write_tokens: number; reasoning_tokens: number;
+                  models: { model: string; requests: number; premium_requests: number; input_tokens: number;
+                            output_tokens: number; cache_read_tokens: number; cache_write_tokens: number;
+                            reasoning_tokens: number }[] };
   publish: {
     status: PublishStatus;
     stage: PublishStage | null;
     steps: Step[];
+    title: string | null;
+    central_available: boolean;       // BCP_CENTRAL_REPO is configured
+    central_requested: boolean;       // the user opted into a central-repository PR
+    central_repo: string | null;      // owner/repository
+    central_branch: string | null;
+    central_commit_sha: string | null;
+    central_pr_number: number | null;
+    central_pr_url: string | null;
     branch: string | null;
     commit_sha: string | null;
     commit_url: string | null;
@@ -149,6 +166,27 @@ type Repository = { id: number; owner: string; name: string; full_name: string; 
 ```ts
 Page<{ name: string; commit_sha: string; protected: boolean }> & { default_branch: string }
 ```
+
+`GET /api/copilot/quota` → `200` — the signed-in user's Copilot budget for the current billing period, read with
+their own token (cached 60 s). Never fails for GitHub errors; returns `available: false` instead.
+```ts
+{ available: false; message: string }
+| { available: true; login: string | null; plan: string | null;
+    unit: "ai_credits" | "premium_requests";   // premium_requests on legacy billing
+    unlimited: boolean; used: number | null; entitlement: number | null; remaining: number | null;
+    percent_remaining: number | null; overage_permitted: boolean; overage_used: number;
+    reset_date: string | null }
+```
+
+`/api/copilot/token` — an optional per-user token used **only** to run Copilot, so users who sign in with a classic
+`ghp_` token (which Copilot rejects) still spend their own credits. A fine-grained token owned by the user's own
+account with only the "Copilot Requests" permission needs no organisation approval. Stored encrypted.
+- `GET` → `{ configured: boolean; sign_in_token_classic: boolean; shared: boolean; needed: boolean }`
+- `POST { token }` → same shape. `400` for classic/invalid tokens, `403` if the token belongs to another account.
+- `DELETE` → `204`.
+
+Job creation fails with `403 copilot_unauthorized` when the user signed in with `ghp_`, has no Copilot token and the
+worker has no shared token.
 
 ### Generators, agent and models
 
@@ -256,9 +294,14 @@ fall back to polling `GET /jobs/{id}` + `/logs` if SSE fails.
 
 `GET /api/bounded-context/jobs/{job_id}/output` → `200 text/markdown` (primary output file, download)
 
-`POST /api/bounded-context/jobs/{job_id}/pull-request` (empty body) → `202 Job` with `publish.status = "queued"`.
+`POST /api/bounded-context/jobs/{job_id}/pull-request` `{ title: string, publish_central?: boolean }` → `202 Job`
+with `publish.status = "queued"`. The title is required (1–256 characters) and is used unchanged for the source PR
+and, when `publish_central` is true, for the PR in `BCP_CENTRAL_REPO`; the organisation's PR-title policy validates
+it on GitHub. Central files are written below `docs/<source-repo>/` on a new branch from the central repository's
+default branch.
 Idempotent: if already queued/running/succeeded returns `200 Job` unchanged. `409 conflict` if the job has not
-succeeded. `403 repository_access_denied` if the user lacks push permission.
+succeeded or central publishing is not configured. `403 repository_access_denied` if the user lacks push permission
+to the source repository, or to the central repository when it is selected.
 
 `POST /api/bounded-context/jobs/{job_id}/cancel` → `202 Job` (`cancel_requested = true`, or `cancelled` if it
 was still queued). `409 conflict` if already terminal.

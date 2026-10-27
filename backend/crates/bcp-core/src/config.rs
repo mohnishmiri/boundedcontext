@@ -162,12 +162,25 @@ pub struct CommonConfig {
     pub agent_bundle_dir: PathBuf,
     pub models_file: PathBuf,
     pub models_show_unverified: bool,
+    pub central_repository: Option<(String, String)>,
 }
 
 impl CommonConfig {
     pub fn from_env() -> Result<Self> {
         let key = env_secret_req("BCP_TOKEN_ENCRYPTION_KEY")?;
         let cipher = TokenCipher::from_base64(&key).context("BCP_TOKEN_ENCRYPTION_KEY")?;
+        let central_repository = match env_opt("BCP_CENTRAL_REPO") {
+            Some(value) => {
+                let (owner, repo) = value.split_once('/').context("BCP_CENTRAL_REPO must be owner/repository")?;
+                if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+                    bail!("BCP_CENTRAL_REPO must be owner/repository");
+                }
+                crate::validate::owner(owner).map_err(|e| anyhow::anyhow!("invalid BCP_CENTRAL_REPO owner: {e}"))?;
+                crate::validate::repo(repo).map_err(|e| anyhow::anyhow!("invalid BCP_CENTRAL_REPO repository: {e}"))?;
+                Some((owner.to_owned(), repo.to_owned()))
+            }
+            None => None,
+        };
         Ok(Self {
             database_url: env_secret_req("BCP_DATABASE_URL")?,
             database_max_connections: env_parse("BCP_DATABASE_MAX_CONNECTIONS", 10)?,
@@ -177,6 +190,7 @@ impl CommonConfig {
             agent_bundle_dir: env_or("BCP_AGENT_BUNDLE_DIR", "/opt/agent-bundle").into(),
             models_file: env_or("BCP_MODELS_FILE", "/etc/bcp/models.yaml").into(),
             models_show_unverified: env_bool("BCP_MODELS_SHOW_UNVERIFIED", false)?,
+            central_repository,
         })
     }
 

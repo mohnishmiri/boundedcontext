@@ -38,10 +38,11 @@ reads untrusted repository content and is driven by an LLM, so it is treated as 
 - Every GitHub listing uses the **user's** token, so users see only repositories they can access *and* where the
   App is installed. Jobs are private to the requester (`get_user_job`); other users get `404`.
 - Job creation re-checks read access, branch existence and App installation server-side; publishing re-checks
-  **push** permission with the user's token immediately before minting a write-capable installation token.
+  **push** permission with the user's token immediately before minting a write-capable installation token. When a
+  user opts into central publishing, the same check is made independently for `BCP_CENTRAL_REPO`.
 - Installation tokens are minted per task, scoped to **one repository** and the minimum permissions
   (`contents: read` for fetching; `contents: write` + `pull_requests: write` for publishing), and never handed to
-  the agent.
+  the agent. Central publishing mints a separate token scoped only to the central repository.
 
 ### CSRF and browser hardening
 

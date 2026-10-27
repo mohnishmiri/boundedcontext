@@ -38,9 +38,9 @@ worker:
   mode: once
   scaledJob:
     maxReplicaCount: 20
-    activeDeadlineSeconds: 3900
+    activeDeadlineSeconds: 18600
   env:
-    BCP_MAX_JOB_TIMEOUT_SECS: "3600"
+    BCP_MAX_JOB_TIMEOUT_SECS: "18000"
     BCP_MAX_REPO_BYTES: "524288000"
     BCP_MAX_REPO_FILES: "100000"
     BCP_TASK_LEASE_SECS: "60"

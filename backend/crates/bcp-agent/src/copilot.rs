@@ -72,8 +72,12 @@ impl CopilotCliAdapter {
     pub fn command_line(&self, req: &AgentRunRequest) -> CommandLine {
         let b = &self.bundle;
         let rt = &b.manifest.runtime;
-        let prompt = b.render_prompt(&req.owner, &req.repo, &req.branch, &req.sha, &req.inputs);
         let scratch = &req.scratch_dir;
+        let agent_dir = scratch.join("copilot-home").join("agents");
+        let mut vars = req.inputs.clone();
+        vars.insert("workspace".into(), req.workspace.display().to_string());
+        vars.insert("agent_dir".into(), agent_dir.display().to_string());
+        let prompt = b.render_prompt(&req.owner, &req.repo, &req.branch, &req.sha, &vars);
 
         let mut args: Vec<String> = vec!["-p".into(), prompt, "--agent".into(), b.id().to_owned()];
         // A model pinned in the agent's frontmatter overrides --model; omit it to avoid a misleading argv.
@@ -98,8 +102,14 @@ impl CopilotCliAdapter {
         if !rt.repository_instructions {
             args.push("--no-custom-instructions".into());
         }
+        // The agent's own files (prompts it references) live outside the workspace; writes stay limited to it.
+        args.extend(["--add-dir".into(), agent_dir.display().to_string()]);
         args.extend(["--log-dir".into(), scratch.join("logs").display().to_string()]);
         args.extend(["--share".into(), scratch.join("transcript.md").display().to_string()]);
+        args.extend([
+            "--usage-output-file".into(),
+            scratch.join(crate::usage::USAGE_FILE).display().to_string(),
+        ]);
 
         let home = scratch.join("home");
         let mut env: Vec<(String, String)> =
@@ -485,7 +495,9 @@ runtime:
         assert!(argv.contains("--allow-tool read --allow-tool write --deny-tool shell --deny-tool url"));
         assert!(argv.contains("--disable-mcp-server github-mcp-server"));
         assert!(argv.contains("--no-custom-instructions"));
+        assert!(argv.contains("--add-dir /scratch/copilot-home/agents"));
         assert!(argv.contains("--share /scratch/transcript.md"));
+        assert!(argv.contains("--usage-output-file /scratch/usage.json"));
         let env: BTreeMap<_, _> = cl.env.iter().cloned().collect();
         assert_eq!(env["COPILOT_HOME"], "/scratch/copilot-home");
         assert_eq!(env["HOME"], "/scratch/home");

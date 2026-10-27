@@ -59,7 +59,14 @@ async fn generate_review_and_publish() {
     assert!(out.text.contains("Orders, Billing and Catalog"));
 
     // Publish.
-    let p = h.post(&format!("/api/bounded-context/jobs/{job_id}/pull-request"), &cookie, None).await;
+    let title = "APM-123: Update bounded context docs";
+    let p = h
+        .post(
+            &format!("/api/bounded-context/jobs/{job_id}/pull-request"),
+            &cookie,
+            Some(serde_json::json!({ "title": title, "publish_central": true })),
+        )
+        .await;
     assert_eq!(p.status, StatusCode::ACCEPTED, "{}", p.text);
     assert_eq!(p.body["publish"]["status"], "queued");
     let job = h.wait_job(&cookie, &job_id, 30, publish_terminal).await;
@@ -68,10 +75,14 @@ async fn generate_review_and_publish() {
     assert_eq!(job["publish"]["branch"], format!("bounded-context/shop-{short}"));
     assert_eq!(job["publish"]["pr_number"], 1);
     assert_eq!(job["pr_url"], job["publish"]["pr_url"]);
+    assert_eq!(job["publish"]["title"], title);
+    assert_eq!(job["publish"]["central_requested"], true);
+    assert_eq!(job["publish"]["central_pr_number"], 1);
+    assert!(job["publish"]["central_pr_url"].as_str().unwrap().contains("/pull/"));
     assert_eq!(job["can_publish"], false);
     let pstates: Vec<_> =
         job["publish"]["steps"].as_array().unwrap().iter().map(|s| s["state"].as_str().unwrap()).collect();
-    assert_eq!(pstates, ["done"; 4]);
+    assert_eq!(pstates, ["done"; 8]);
 
     // What landed on GitHub: a commit on a new branch parented on the analysed SHA, containing only the doc.
     let branch = job["publish"]["branch"].as_str().unwrap().to_owned();
@@ -87,8 +98,17 @@ async fn generate_review_and_publish() {
         let pulls = s.pulls_for("acme", "shop");
         assert_eq!(pulls.len(), 1);
         assert_eq!(pulls[0].base, "main");
+        assert_eq!(pulls[0].title, title);
         assert!(pulls[0].body.contains("placeholder agent"));
         assert_eq!(s.branch_head("acme", "shop", "main").as_deref(), Some(main_sha.as_str()), "base branch untouched");
+        let central = "ATT-DP1/apm0014313-ragaflow-ai-context-docs";
+        let central_branch = job["publish"]["central_branch"].as_str().unwrap();
+        let central_sha = job["publish"]["central_commit_sha"].as_str().unwrap();
+        assert_eq!(s.branch_head("ATT-DP1", "apm0014313-ragaflow-ai-context-docs", central_branch).as_deref(), Some(central_sha));
+        assert_eq!(s.file_at(central_sha, "docs/shop/bounded-context.md").unwrap(), s.file_at(&commit_sha, "docs/bounded-context.md").unwrap());
+        let central_pulls = s.pulls_for("ATT-DP1", "apm0014313-ragaflow-ai-context-docs");
+        assert_eq!(central_pulls.len(), 1);
+        assert_eq!(central_pulls[0].title, title);
     });
 
     // Publishing again is idempotent.

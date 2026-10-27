@@ -27,6 +27,8 @@ pub struct ApiConfig {
     pub copilot_integration_id: String,
     /// Most repositories one batch request may cover.
     pub batch_max_repos: usize,
+    /// The worker runs every job with one shared Copilot token instead of the requester's.
+    pub copilot_shared_token: bool,
 }
 
 impl ApiConfig {
@@ -57,6 +59,7 @@ impl ApiConfig {
             copilot_api_url,
             copilot_integration_id: env_or("BCP_COPILOT_INTEGRATION_ID", "copilot-developer-cli"),
             batch_max_repos: env_parse("BCP_BATCH_MAX_REPOS", 25)?,
+            copilot_shared_token: env_bool("BCP_COPILOT_SHARED_TOKEN", false)?,
         })
     }
 

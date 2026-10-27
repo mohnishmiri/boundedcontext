@@ -1,0 +1,51 @@
+# OMNI README.md + AGENTS.md generator — runs the OMNI `omni-document --mode readme` skill non-interactively.
+# The skill files under agents/omni-document/ are a verbatim snapshot of ATT-DP1/apm0011159-omni-global-rules
+# (plugins/omni-plugin/.apm/skills/...) at the commit in OMNI_SOURCE_SHA. To refresh, re-download with
+# `gh api repos/ATT-DP1/apm0011159-omni-global-rules/contents/plugins/omni-plugin/.apm/skills/<skill>/<file> \
+#   -H "Accept: application/vnd.github.raw"` for each file here, update OMNI_SOURCE_SHA, commit and push.
+
+schema_version: 1
+
+placeholder: false
+
+agent:
+  id: omni-readme
+  display_name: OMNI README.md + AGENTS.md
+  description: >-
+    Runs the OMNI omni-document skill in --readme mode: walks the repository and writes README.md and AGENTS.md
+    at the repository (or subfolder) root using the OMNI README template.
+
+prompt:
+  template: |
+    You are the `omni-readme` agent. Run the procedure yourself in this session; do not delegate it.
+    Run /omni-document --mode readme for:
+      REPOSITORY_ROOT = {{workspace}}{{#scope_path}}/{{scope_path}}{{/scope_path}}
+      REPOSITORY_NAME = {{repo}}
+    The OMNI skill files are in `{{agent_dir}}/omni-document/` (read-only; write nothing there):
+    `SKILL.md`, `references/mode-readme.md`, `templates/OMNI-README-TEMPLATE.md` and the rules in `rules/`.
+    Write README.md and AGENTS.md at REPOSITORY_ROOT.
+
+inputs:
+  - name: scope_path
+    label: Subdirectory (repository root)
+    help: Leave empty to document the repository root, or enter a subfolder path for a monorepo microservice.
+    kind: path
+    required: false
+    default: ""
+    max_length: 200
+
+output:
+  paths:
+    - README.md
+    - AGENTS.md
+    - "**/README.md"
+    - "**/AGENTS.md"
+  min_bytes: 200
+  max_bytes: 1048576
+
+runtime:
+  timeout_secs: 3600
+  allow_tools: [read, write, edit, search]
+  deny_tools: [shell, url, memory]
+  disable_mcp_servers: [github-mcp-server]
+  repository_instructions: false

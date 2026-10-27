@@ -3,8 +3,15 @@
 # ---- build ----
 FROM node:22-alpine AS build
 WORKDIR /app
+ARG CORPORATE_CA_CERT_ENABLED
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates-extra.crt
 COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN --mount=type=secret,id=corporate_ca,required=false \
+    cp /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates-extra.crt \
+ && if [ "$CORPORATE_CA_CERT_ENABLED" = "1" ]; then \
+        cat /run/secrets/corporate_ca >> /etc/ssl/certs/ca-certificates-extra.crt; \
+     fi \
+ && npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build
 

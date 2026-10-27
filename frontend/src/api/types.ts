@@ -58,6 +58,10 @@ export type PublishStage =
   | 'creating_commit'
   | 'creating_branch'
   | 'creating_pull_request'
+  | 'checking_central_base'
+  | 'creating_central_commit'
+  | 'creating_central_branch'
+  | 'creating_central_pull_request'
   | 'completed';
 export type StepState = 'pending' | 'active' | 'done' | 'failed' | 'skipped';
 
@@ -103,6 +107,14 @@ export type JobPublish = {
   status: PublishStatus;
   stage: PublishStage | null;
   steps: Step[];
+  title: string | null;
+  central_available: boolean;
+  central_requested: boolean;
+  central_repo: string | null;
+  central_branch: string | null;
+  central_commit_sha: string | null;
+  central_pr_number: number | null;
+  central_pr_url: string | null;
   branch: string | null;
   commit_sha: string | null;
   commit_url: string | null;
@@ -113,6 +125,52 @@ export type JobPublish = {
 };
 
 export type GeneratorSource = 'builtin' | 'curated' | 'user';
+
+export type TokenCounts = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+};
+
+/** Copilot usage summed over the job's agent runs (retries included). */
+export type JobUsage = TokenCounts & {
+  runs: number;
+  premium_requests: number;
+  /** Estimated from the CLI's nano-AIU totals. */
+  ai_credits?: number;
+  /** Billed to the portal's shared Copilot token instead of the requester. */
+  shared_token?: boolean;
+  api_duration_ms: number;
+  models: (TokenCounts & { model: string; requests: number; premium_requests: number; ai_credits?: number })[];
+};
+
+/** The signed-in user's Copilot budget for the current billing period. */
+export type CopilotQuota =
+  | { available: false; message: string }
+  | {
+      available: true;
+      login: string | null;
+      plan: string | null;
+      unit: 'ai_credits' | 'premium_requests';
+      unlimited: boolean;
+      used: number | null;
+      entitlement: number | null;
+      remaining: number | null;
+      percent_remaining: number | null;
+      overage_permitted: boolean;
+      overage_used: number;
+      reset_date: string | null;
+    };
+
+/** Whether generations can run on the user's own Copilot credits. */
+export type CopilotTokenStatus = {
+  configured: boolean;
+  sign_in_token_classic: boolean;
+  shared: boolean;
+  needed: boolean;
+};
 
 /** The generator a job ran with, as recorded on the job (may point at a since-removed generator). */
 export type JobGenerator = {
@@ -142,6 +200,7 @@ export type Job = JobSummary & {
   updated_at: string;
   duration_ms: number | null;
   output: JobOutput | null;
+  usage: JobUsage | null;
   publish: JobPublish;
 };
 

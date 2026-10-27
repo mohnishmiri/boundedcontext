@@ -32,6 +32,7 @@ x-backend-env: &backend-env
   BCP_GITHUB_PRIVATE_KEY_FILE: ${BCP_GITHUB_PRIVATE_KEY_FILE:-/secrets/github-app-private-key}
   BCP_TOKEN_ENCRYPTION_KEY_FILE: /secrets/token-encryption-key
   BCP_MODELS_SHOW_UNVERIFIED: "true"
+  BCP_CENTRAL_REPO: ${BCP_CENTRAL_REPO:-}
   BCP_LOG_FORMAT: pretty
   RUST_LOG: info,bcp_api=debug,bcp_worker=debug,sqlx=warn
 
@@ -52,7 +53,14 @@ services:
 
   # Generates a throwaway GitHub App key and token-encryption key once (kept in the dev-secrets volume).
   dev-secrets:
-    build: { context: ., dockerfile: backend/Dockerfile, target: dev-tools }
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: dev-tools
+      args:
+        CORPORATE_CA_CERT_ENABLED: ${BCP_CA_CERT_FILE:+1}
+      secrets:
+        - corporate_ca
     user: "0:0"
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -64,14 +72,28 @@ services:
     volumes: [devsecrets:/secrets]
 
   mock-github:
-    build: { context: ., dockerfile: backend/Dockerfile, target: dev-tools }
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: dev-tools
+      args:
+        CORPORATE_CA_CERT_ENABLED: ${BCP_CA_CERT_FILE:+1}
+      secrets:
+        - corporate_ca
     environment:
       MOCK_GITHUB_LISTEN: 0.0.0.0:9000
       MOCK_GITHUB_PUBLIC_URL: http://localhost:${BCP_MOCK_PORT:-9000}
     ports: ["127.0.0.1:${BCP_MOCK_PORT:-9000}:9000"]
 
   api:
-    build: { context: ., dockerfile: backend/Dockerfile, target: api }
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: api
+      args:
+        CORPORATE_CA_CERT_ENABLED: ${BCP_CA_CERT_FILE:+1}
+      secrets:
+        - corporate_ca
     environment:
       <<: *backend-env
       BCP_COOKIE_SECURE: "false"
@@ -81,6 +103,8 @@ services:
       # Models each user can use are listed from the Copilot API when the portal talks to real GitHub. Against
       # the mock, set this to http://mock-github:9000/copilot to exercise the live path (otherwise the catalog).
       BCP_COPILOT_API_URL: ${BCP_COPILOT_API_URL:-}
+      # Only whether a shared token is set; the token itself stays with the worker.
+      BCP_COPILOT_SHARED_TOKEN: ${BCP_COPILOT_GITHUB_TOKEN:+true}
     ports: ["127.0.0.1:${BCP_API_PORT:-8080}:8080"]
     volumes:
       - devsecrets:/secrets:ro
@@ -93,14 +117,24 @@ services:
       mock-github: { condition: service_started }
 
   worker:
-    build: { context: ., dockerfile: backend/Dockerfile, target: worker-dev }
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: worker-dev
+      args:
+        CORPORATE_CA_CERT_ENABLED: ${BCP_CA_CERT_FILE:+1}
+      secrets:
+        - corporate_ca
     environment:
       <<: *backend-env
       BCP_COPILOT_BIN: ${BCP_COPILOT_BIN:-/usr/local/bin/fake-copilot}
+      BCP_COPILOT_GITHUB_TOKEN: ${BCP_COPILOT_GITHUB_TOKEN:-}
+      BCP_MAX_JOB_TIMEOUT_SECS: ${BCP_MAX_JOB_TIMEOUT_SECS:-18000}
       BCP_WORKER_CONCURRENCY: "2"
       BCP_GENERATE_MAX_ATTEMPTS: "1"
     read_only: true
-    tmpfs: ["/work:uid=10001,gid=10001,mode=0700", "/tmp:mode=1777", "/home/worker:uid=10001,gid=10001,mode=0700"]
+    # exec: Copilot CLI extracts and loads a native addon under the per-job HOME in /work.
+    tmpfs: ["/work:uid=10001,gid=10001,mode=0700,exec", "/tmp:mode=1777", "/home/worker:uid=10001,gid=10001,mode=0700"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     volumes:
@@ -111,7 +145,12 @@ services:
       api: { condition: service_started }
 
   frontend:
-    build: { context: ./frontend }
+    build:
+      context: ./frontend
+      args:
+        CORPORATE_CA_CERT_ENABLED: ${BCP_CA_CERT_FILE:+1}
+      secrets:
+        - corporate_ca
     environment:
       API_UPSTREAM: http://api:8080
     ports: ["127.0.0.1:${BCP_UI_PORT:-3000}:8080"]
@@ -120,3 +159,7 @@ services:
 volumes:
   pgdata:
   devsecrets:
+
+secrets:
+  corporate_ca:
+    file: ${BCP_CA_CERT_FILE:-./.env.example}

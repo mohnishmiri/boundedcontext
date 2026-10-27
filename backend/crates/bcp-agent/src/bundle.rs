@@ -18,7 +18,7 @@ pub const MANIFEST_FILE: &str = "bundle.yaml";
 pub const AGENTS_DIR: &str = "agents";
 
 /// Variables the platform supplies to every prompt (inputs are added on top).
-pub const BUILTIN_VARS: &[&str] = &["owner", "repo", "branch", "sha", "output_path"];
+pub const BUILTIN_VARS: &[&str] = &["owner", "repo", "branch", "sha", "output_path", "workspace", "agent_dir"];
 
 static TOOL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.:*()/@ -]{1,128}$").unwrap());
 static MCP_NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]{1,64}$").unwrap());
@@ -474,12 +474,16 @@ impl AgentBundle {
 }
 
 /// A restricted output glob must be `<literal or ** components>/docs/.../<file>.<safe ext>` with no dot
-/// components, so a bundle cannot target workflows, manifests or source files.
+/// components, so a bundle cannot target workflows, manifests or source files. `README.md` and `AGENTS.md` are
+/// documentation by name and may sit anywhere outside dot-directories.
 fn check_output_glob(glob: &str) -> Result<(), &'static str> {
     let parts: Vec<&str> = glob.split('/').collect();
     let (file, dirs) = parts.split_last().ok_or("empty path")?;
     if parts.iter().any(|c| c.starts_with('.')) {
         return Err("it points into a dot-directory or dot-file");
+    }
+    if matches!(*file, "README.md" | "AGENTS.md") {
+        return Ok(());
     }
     let ext = file.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     if !SAFE_OUTPUT_EXTENSIONS.contains(&ext.as_str()) {
@@ -718,5 +722,15 @@ runtime:
         let dir = tempfile::tempdir().unwrap();
         write_bundle(dir.path(), MANIFEST, "# a\n");
         assert!(AgentBundle::load(dir.path()).unwrap().matches_output("docs/contexts/orders.md"));
+    }
+
+    #[test]
+    fn readme_and_agents_md_are_allowed_anywhere_but_dot_directories() {
+        for ok in ["README.md", "AGENTS.md", "**/README.md", "services/orders/AGENTS.md"] {
+            assert!(check_output_glob(ok).is_ok(), "{ok}");
+        }
+        for bad in [".github/README.md", "src/README.txt", "src/readme.sh", "CONTRIBUTING.md"] {
+            assert!(check_output_glob(bad).is_err(), "{bad}");
+        }
     }
 }

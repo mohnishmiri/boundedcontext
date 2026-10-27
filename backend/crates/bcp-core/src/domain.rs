@@ -85,6 +85,10 @@ text_enum!(PublishStage {
     CreatingCommit => "creating_commit",
     CreatingBranch => "creating_branch",
     CreatingPullRequest => "creating_pull_request",
+    CheckingCentralBase => "checking_central_base",
+    CreatingCentralCommit => "creating_central_commit",
+    CreatingCentralBranch => "creating_central_branch",
+    CreatingCentralPullRequest => "creating_central_pull_request",
     Completed => "completed",
 });
 
@@ -96,6 +100,10 @@ impl PublishStage {
             Self::CreatingCommit => "Creating commit",
             Self::CreatingBranch => "Creating branch",
             Self::CreatingPullRequest => "Opening pull request",
+            Self::CheckingCentralBase => "Checking central repository",
+            Self::CreatingCentralCommit => "Creating central repository commit",
+            Self::CreatingCentralBranch => "Creating central repository branch",
+            Self::CreatingCentralPullRequest => "Opening central repository pull request",
             Self::Completed => "Completed",
         }
     }

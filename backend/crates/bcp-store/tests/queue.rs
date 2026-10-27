@@ -147,7 +147,10 @@ async fn completion_artifacts_publish_and_audit() {
     let Some(store) = fresh_store().await else { return };
     let user = store.upsert_user(1, "octocat", Some("Mona"), None).await.unwrap();
     let job = store.create_job(new_job(user.id, "main")).await.unwrap();
-    assert!(matches!(store.request_publish(user.id, job.id, 5, &json!({})).await, Err(StoreError::Conflict(_))));
+    assert!(matches!(
+        store.request_publish(user.id, job.id, 5, &json!({}), "APM-123: Update context", false).await,
+        Err(StoreError::Conflict(_))
+    ));
     store.start_job(job.id, &json!({})).await.unwrap();
     let seq1 = store.append_event(job.id, "info", "preparing", "one").await.unwrap();
     let seq2 = store.append_event(job.id, "info", "preparing", "two").await.unwrap();
@@ -187,9 +190,12 @@ async fn completion_artifacts_publish_and_audit() {
     assert_eq!(done.status(), JobStatus::Succeeded);
     assert_eq!(store.list_artifacts(job.id).await.unwrap().len(), 2);
 
-    assert!(matches!(store.request_publish(user.id, job.id, 5, &json!({})).await.unwrap(), PublishOutcome::Queued(_)));
     assert!(matches!(
-        store.request_publish(user.id, job.id, 5, &json!({})).await.unwrap(),
+        store.request_publish(user.id, job.id, 5, &json!({}), "APM-123: Update context", false).await.unwrap(),
+        PublishOutcome::Queued(_)
+    ));
+    assert!(matches!(
+        store.request_publish(user.id, job.id, 5, &json!({}), "APM-123: Update context", false).await.unwrap(),
         PublishOutcome::Unchanged(_)
     ));
 

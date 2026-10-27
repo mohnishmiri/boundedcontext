@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod bundle;
 pub mod copilot;
 pub mod template;
+pub mod usage;
 pub mod workspace;
 
 pub use adapter::{
@@ -12,3 +13,4 @@ pub use adapter::{
 };
 pub use bundle::{AgentBundle, InputKind, InputSpec};
 pub use copilot::CopilotCliAdapter;
+pub use usage::UsageSummary;

@@ -109,6 +109,21 @@ impl Harness {
     pub async fn new() -> Option<Self> {
         let db = fresh_database().await?;
         let mock = MockGitHub::start().await;
+        mock.with(|state| {
+            state.add_repo(
+                "ATT-DP1",
+                "apm0014313-ragaflow-ai-context-docs",
+                "central bounded-context documentation",
+                &[("README.md", "# Context index\n")],
+                &[("octocat", mock_github::Perm::WRITE)],
+            );
+            state.installations.push(mock_github::MockInstallation {
+                id: 300,
+                account: "ATT-DP1".into(),
+                kind: "Organization".into(),
+                repos: vec!["att-dp1/apm0014313-ragaflow-ai-context-docs".into()],
+            });
+        });
         let url = Url::parse(&mock.url).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let tmp_work = tmp.path().join("api-work");
@@ -132,6 +147,7 @@ impl Harness {
             agent_bundle_dir: repo_root().join("backend/tools/integration-tests/fixtures/bundle"),
             models_file: repo_root().join("config/models.yaml"),
             models_show_unverified: false,
+            central_repository: Some(("ATT-DP1".into(), "apm0014313-ragaflow-ai-context-docs".into())),
         };
         let cfg = ApiConfig {
             common: common.clone(),
@@ -148,6 +164,7 @@ impl Harness {
             copilot_api_url: Some(Url::parse(&format!("{}/copilot", mock.url)).unwrap()),
             copilot_integration_id: "copilot-developer-cli".into(),
             batch_max_repos: 25,
+            copilot_shared_token: false,
         };
         let state = bcp_api::build_state(cfg).await.unwrap();
         let store = state.store.clone();
@@ -179,6 +196,7 @@ impl Harness {
             worker_id: format!("test-worker-{}", Uuid::new_v4().simple()),
             work_dir: self.tmp.path().join("work"),
             copilot_bin: script.clone(),
+            copilot_token: None,
             max_job_timeout: Duration::from_secs(60),
             max_repo_bytes: 50 * 1024 * 1024,
             max_repo_files: 10_000,
@@ -229,6 +247,11 @@ impl Harness {
     }
 
     pub async fn post(&self, path: &str, cookie: &str, body: Option<Value>) -> Response {
+        let body = if path.ends_with("/pull-request") && body.is_none() {
+            Some(serde_json::json!({ "title": "APM-123: Update bounded context", "publish_central": false }))
+        } else {
+            body
+        };
         self.call("POST", path, Some(cookie), body).await
     }
 

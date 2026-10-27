@@ -117,12 +117,12 @@ fn token_login_page(return_to: &str, error_msg: Option<&str>) -> Response {
 <body>
   <div class="card">
     <h1>Sign in with GitHub Token</h1>
-    <p>Enter your GitHub Personal Access Token (<code>ghp_…</code> or <code>github_pat_…</code>) to sign in to your real GitHub account, repositories, and branches.</p>
+    <p>Enter your GitHub Personal Access Token (<code>ghp_…</code> classic with <code>repo</code> scope, or <code>github_pat_…</code>) to browse your repositories and open pull requests. Generation runs on <em>your</em> Copilot credits: with a classic token you will be asked once for a separate Copilot token (the output of <code>gh auth token</code>; no organisation approval needed).</p>
     {err_banner}
     <form method="GET" action="/api/auth/github">
       <input type="hidden" name="return_to" value="{return_to}">
       <label for="gh-token">GitHub Personal Access Token</label>
-      <input id="gh-token" name="token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" required autofocus autocomplete="off">
+      <input id="gh-token" name="token" type="password" placeholder="ghp_… or github_pat_…" required autofocus autocomplete="off">
       <button type="submit">Sign in with GitHub</button>
     </form>
     <div class="hint">

@@ -100,6 +100,30 @@ impl Store {
         Ok(())
     }
 
+    pub async fn set_copilot_token(&self, user_id: Uuid, token: &[u8]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO copilot_tokens (user_id, token) VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, updated_at = now()",
+        )
+        .bind(user_id)
+        .bind(token)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_copilot_token(&self, user_id: Uuid) -> Result<Option<Vec<u8>>> {
+        Ok(sqlx::query_scalar("SELECT token FROM copilot_tokens WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
+    pub async fn delete_copilot_token(&self, user_id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM copilot_tokens WHERE user_id = $1").bind(user_id).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn create_session(&self, id_hash: &[u8], user_id: Uuid, expires_at: DateTime<Utc>) -> Result<()> {
         sqlx::query("INSERT INTO sessions (id_hash, user_id, expires_at) VALUES ($1, $2, $3)")
             .bind(id_hash)

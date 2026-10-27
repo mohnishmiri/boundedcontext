@@ -94,6 +94,8 @@ describe('Job page', () => {
       can_publish: false,
       publish: {
         ...f.succeededJob().publish,
+        central_available: true,
+        central_repo: 'ATT-DP1/apm0014313-ragaflow-ai-context-docs',
         status: 'queued',
         stage: 'queued',
         steps: [
@@ -104,9 +106,10 @@ describe('Job page', () => {
     });
     let publishCalls = 0;
     server.use(
-      http.post('/api/bounded-context/jobs/:id/pull-request', ({ request }) => {
+      http.post('/api/bounded-context/jobs/:id/pull-request', async ({ request }) => {
         publishCalls += 1;
         expect(request.headers.get('X-Requested-With')).toBe('bcp');
+        expect(await request.json()).toEqual({ title: 'APM-123: Update shop context', publish_central: true });
         return HttpResponse.json(queued, { status: 202 });
       }),
     );
@@ -126,6 +129,8 @@ describe('Job page', () => {
 
     // Terminal + publish not started: no stream until publishing starts.
     expect(MockEventSource.instances).toHaveLength(0);
+    await user.type(screen.getByRole('textbox', { name: 'Pull request title' }), 'APM-123: Update shop context');
+    await user.click(screen.getByRole('checkbox', { name: /Also create a pull request/ }));
     await user.click(screen.getByRole('button', { name: 'Create pull request' }));
     await waitFor(() => expect(publishCalls).toBe(1));
     expect(await screen.findByRole('list', { name: 'Publishing steps' })).toBeInTheDocument();
@@ -148,6 +153,8 @@ describe('Job page', () => {
             commit_url: 'https://github.com/acme/shop/commit/c0ffee0000000000000000000000000000000000',
             pr_number: 7,
             pr_url: 'https://github.com/acme/shop/pull/7',
+            central_pr_number: 12,
+            central_pr_url: 'https://github.com/ATT-DP1/apm0014313-ragaflow-ai-context-docs/pull/12',
           },
         }),
       ),
@@ -156,6 +163,10 @@ describe('Job page', () => {
     expect(await screen.findByRole('link', { name: 'Open pull request #7' })).toHaveAttribute(
       'href',
       'https://github.com/acme/shop/pull/7',
+    );
+    expect(screen.getByRole('link', { name: 'Open central repository pull request #12' })).toHaveAttribute(
+      'href',
+      'https://github.com/ATT-DP1/apm0014313-ragaflow-ai-context-docs/pull/12',
     );
     expect(screen.getByRole('link', { name: 'bounded-context/shop-0b9c2f8e' })).toHaveAttribute(
       'href',

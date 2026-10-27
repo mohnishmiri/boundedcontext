@@ -327,6 +327,7 @@ impl Worker {
             }
             None => {
                 let title = format!("docs: bounded-context documentation for {repo}");
+                let title = job.publish_title.as_deref().unwrap_or(&title);
                 let body = self.pr_body(job, &base_sha, &requester_login.0, &files);
                 match gh.create_pull(&token, owner, repo, &title, &body, &branch, &job.base_branch).await {
                     Ok(pr) => {
@@ -372,9 +373,226 @@ impl Worker {
             )
             .await
             .map_err(|e| Outcome::Failed(e.into()))?;
+        if job.publish_central {
+            self.publish_central(job, ctl, steps, log, &requester_login.0, &files).await?;
+        }
         steps.complete();
         store.complete_publish(job.id, &steps.to_json()).await.map_err(|e| Outcome::Failed(e.into()))?;
         log.info(&format!("Pull request ready: {}", pr.html_url)).await;
+        Ok(())
+    }
+
+    async fn publish_central(
+        &self,
+        job: &JobRow,
+        ctl: &RunCtl,
+        steps: &mut StageTracker,
+        log: &JobLogger,
+        requester_login: &str,
+        files: &[TreeFile],
+    ) -> Result<(), Outcome> {
+        let (owner, repo) = self
+            .cfg
+            .common
+            .central_repository
+            .as_ref()
+            .ok_or_else(|| Outcome::Failed(AppError::conflict("Central repository publishing is not configured.")))?;
+        let requester = job.publish_requested_by.unwrap_or(job.user_id);
+        let user_token = guard(ctl, self.tokens.access_token(requester)).await?;
+        let central_repo = guard(ctl, async {
+            self.github.get_repository(&user_token, owner, repo).await.map_err(|e| e.to_user_error())
+        })
+        .await?;
+        if !central_repo.permissions().push {
+            return Err(Outcome::Failed(
+                AppError::new(
+                    ErrorCode::RepositoryAccessDenied,
+                    "You need write access to the central repository to open its pull request.",
+                )
+                .retryable(false),
+            ));
+        }
+        let token = if self.github.has_app() {
+            let installation = guard(ctl, async {
+                self.github.get_repository_installation(owner, repo).await.map(|i| i.id).map_err(svc)
+            })
+            .await?;
+            guard(ctl, async {
+                self.github
+                    .create_installation_token(installation, repo, &[("contents", "write"), ("pull_requests", "write")])
+                    .await
+                    .map_err(svc)
+            })
+            .await?
+            .token
+        } else {
+            user_token
+        };
+        let base_branch = central_repo.default_branch;
+
+        self.publish_stage(job, steps, log, PublishStage::CheckingCentralBase).await?;
+        let base_sha = guard(ctl, async {
+            self.github.get_branch_head(&token, owner, repo, &base_branch).await.map_err(svc)
+        })
+        .await?
+        .ok_or_else(|| {
+            Outcome::Failed(
+                AppError::new(ErrorCode::BaseBranchChanged, "The central repository default branch was not found.")
+                    .retryable(false),
+            )
+        })?;
+        let central_files: Vec<TreeFile> = files
+            .iter()
+            .map(|file| {
+                let relative = file.path.strip_prefix("docs/").unwrap_or(&file.path);
+                TreeFile { path: format!("docs/{}/{relative}", job.repo), content: file.content.clone() }
+            })
+            .collect();
+
+        self.publish_stage(job, steps, log, PublishStage::CreatingCentralCommit).await?;
+        let commit_sha = match &job.central_publish_commit_sha {
+            Some(sha) => sha.clone(),
+            None => {
+                let base_commit = guard(ctl, async {
+                    self.github.get_git_commit(&token, owner, repo, &base_sha).await.map_err(svc)
+                })
+                .await?;
+                let tree = guard(ctl, async {
+                    self.github.create_tree(&token, owner, repo, &base_commit.tree.sha, &central_files).await.map_err(svc)
+                })
+                .await?;
+                let title = job.publish_title.as_deref().unwrap_or("Bounded context documentation");
+                let message = format!(
+                    "docs: update context for {}\n\n{title}\n\n{JOB_TRAILER}: {}\n",
+                    job.repo, job.id
+                );
+                let commit = guard(ctl, async {
+                    self.github.create_commit(&token, owner, repo, &message, &tree, &[&base_sha]).await.map_err(svc)
+                })
+                .await?;
+                self.store
+                    .save_publish_progress(
+                        job.id,
+                        &PublishProgress { central_commit_sha: Some(commit.sha.clone()), ..Default::default() },
+                    )
+                    .await
+                    .map_err(|e| Outcome::Failed(e.into()))?;
+                self.audit(job, actions::COMMIT_CREATED, json!({ "target": "central", "commit_sha": commit.sha }))
+                    .await;
+                log.info(&format!("Created central repository commit {}", &commit.sha[..commit.sha.len().min(12)])).await;
+                commit.sha
+            }
+        };
+
+        self.publish_stage(job, steps, log, PublishStage::CreatingCentralBranch).await?;
+        let branch = job
+            .central_publish_branch
+            .clone()
+            .unwrap_or_else(|| format!("bounded-context/{}-{}-central", validate::slugify(&job.repo, 40), job.short_id()));
+        self.store
+            .save_publish_progress(job.id, &PublishProgress { central_branch: Some(branch.clone()), ..Default::default() })
+            .await
+            .map_err(|e| Outcome::Failed(e.into()))?;
+        let mut existing = guard(ctl, async {
+            self.github.get_branch_head(&token, owner, repo, &branch).await.map_err(svc)
+        })
+        .await?;
+        if existing.is_none() {
+            match self.github.create_branch(&token, owner, repo, &branch, &commit_sha).await {
+                Ok(()) => {
+                    self.audit(
+                        job,
+                        actions::BRANCH_CREATED,
+                        json!({ "target": "central", "branch": branch, "commit_sha": commit_sha }),
+                    )
+                    .await;
+                    log.info(&format!("Created central repository branch {branch}")).await;
+                }
+                Err(GitHubError::Unprocessable { .. }) => {
+                    existing = guard(ctl, async {
+                        self.github.get_branch_head(&token, owner, repo, &branch).await.map_err(svc)
+                    })
+                    .await?;
+                }
+                Err(e) => return Err(Outcome::Failed(svc(e))),
+            }
+        }
+        if let Some(head) = existing {
+            if head != commit_sha {
+                let theirs = guard(ctl, async {
+                    self.github.get_git_commit(&token, owner, repo, &head).await.map_err(svc)
+                })
+                .await?;
+                if theirs.message.contains(&format!("{JOB_TRAILER}: {}", job.id)) {
+                    self.store
+                        .save_publish_progress(
+                            job.id,
+                            &PublishProgress { central_commit_sha: Some(head.clone()), ..Default::default() },
+                        )
+                        .await
+                        .map_err(|e| Outcome::Failed(e.into()))?;
+                } else {
+                    return Err(Outcome::Failed(
+                        AppError::new(
+                            ErrorCode::BranchConflict,
+                            format!("Central repository branch '{branch}' already exists with other commits."),
+                        )
+                        .retryable(false),
+                    ));
+                }
+            }
+        }
+
+        self.publish_stage(job, steps, log, PublishStage::CreatingCentralPullRequest).await?;
+        let pr = match guard(ctl, async {
+            self.github.find_open_pull(&token, owner, repo, &branch, &base_branch).await.map_err(svc)
+        })
+        .await?
+        {
+            Some(pr) => pr,
+            None => {
+                let title = job.publish_title.as_deref().unwrap_or("Bounded context documentation");
+                let body = self.pr_body(job, &base_sha, requester_login, &central_files);
+                match self.github.create_pull(&token, owner, repo, title, &body, &branch, &base_branch).await {
+                    Ok(pr) => pr,
+                    Err(GitHubError::Unprocessable { message }) => match guard(ctl, async {
+                        self.github.find_open_pull(&token, owner, repo, &branch, &base_branch).await.map_err(svc)
+                    })
+                    .await?
+                    {
+                        Some(pr) => pr,
+                        None => {
+                            return Err(Outcome::Failed(
+                                AppError::new(
+                                    ErrorCode::Conflict,
+                                    format!("GitHub refused to open the central pull request: {message}"),
+                                )
+                                .retryable(false),
+                            ));
+                        }
+                    },
+                    Err(e) => return Err(Outcome::Failed(svc(e))),
+                }
+            }
+        };
+        self.store
+            .save_publish_progress(
+                job.id,
+                &PublishProgress {
+                    central_pr_number: Some(pr.number as i32),
+                    central_pr_url: Some(pr.html_url.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| Outcome::Failed(e.into()))?;
+        self.audit(
+            job,
+            actions::PULL_REQUEST_CREATED,
+            json!({ "target": "central", "pr_number": pr.number, "pr_url": pr.html_url }),
+        )
+        .await;
+        log.info(&format!("Central repository pull request ready: {}", pr.html_url)).await;
         Ok(())
     }
 

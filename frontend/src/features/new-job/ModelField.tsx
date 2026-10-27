@@ -53,11 +53,6 @@ export function ModelField({
         </p>
       )}
       {selected?.description && <p className="text-sm text-gray-600 dark:text-gray-300">{selected.description}</p>}
-      {models.warning && (
-        <p className="text-xs text-amber-800 dark:text-amber-200" role="status">
-          {models.warning}
-        </p>
-      )}
       <p id="model-help" className="text-xs text-gray-500 dark:text-gray-400">
         {models.entitlement_note}
         {options.some((m) => m.multiplier !== null) && ' “×n” is the premium-request multiplier.'}

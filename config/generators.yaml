@@ -23,7 +23,14 @@
 #     owner: mohnishmiri
 #     repo: bounded-context-generator
 #     path: aifc-archetype-generator      # must contain bundle.yaml (agents_dir: "." if the agent files sit beside it)
-curated: []
+curated:
+  # Vendored OMNI omni-document --mode readme (snapshot of ATT-DP1/apm0011159-omni-global-rules); lives in this repo.
+  - id: omni-readme
+    name: OMNI README.md + AGENTS.md
+    description: Runs OMNI omni-document --mode readme to write README.md and AGENTS.md with the OMNI template.
+    owner: mohnishmiri
+    repo: boundedcontext
+    path: generators/omni-readme
 
 # Repositories users may add as their own generators (owner/repo, or owner/* for every repository of an
 # owner; case-insensitive). Leave empty to disable user-added generators.

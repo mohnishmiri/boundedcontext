@@ -3,6 +3,8 @@ import type {
   ApiErrorBody,
   BatchResponse,
   BranchPage,
+  CopilotQuota,
+  CopilotTokenStatus,
   CreateBatchRequest,
   CreateGeneratorRequest,
   CreateJobRequest,
@@ -276,6 +278,22 @@ export function getModels(signal?: AbortSignal): Promise<ModelList> {
   return request('/models', { signal });
 }
 
+export function getCopilotQuota(signal?: AbortSignal): Promise<CopilotQuota> {
+  return request('/copilot/quota', { signal });
+}
+
+export function getCopilotTokenStatus(signal?: AbortSignal): Promise<CopilotTokenStatus> {
+  return request('/copilot/token', { signal });
+}
+
+export function saveCopilotToken(token: string): Promise<CopilotTokenStatus> {
+  return request('/copilot/token', { method: 'POST', body: { token } });
+}
+
+export function deleteCopilotToken(): Promise<void> {
+  return request('/copilot/token', { method: 'DELETE' });
+}
+
 // ---------- jobs ----------
 
 const JOBS = '/bounded-context/jobs';
@@ -314,8 +332,11 @@ export function getJobDiff(id: string, signal?: AbortSignal): Promise<JobDiff> {
   return request(`${JOBS}/${seg(id)}/diff`, { signal });
 }
 
-export function requestPullRequest(id: string): Promise<Job> {
-  return request(`${JOBS}/${seg(id)}/pull-request`, { method: 'POST' });
+export function requestPullRequest(
+  id: string,
+  body: { title: string; publish_central: boolean },
+): Promise<Job> {
+  return request(`${JOBS}/${seg(id)}/pull-request`, { method: 'POST', body });
 }
 
 export function cancelJob(id: string): Promise<Job> {

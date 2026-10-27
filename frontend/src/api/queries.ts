@@ -10,6 +10,8 @@ export const queryKeys = {
   generators: ['generators'] as const,
   generatorAgent: (id: string) => ['generators', 'agent', id] as const,
   models: ['models'] as const,
+  copilotQuota: ['copilot', 'quota'] as const,
+  copilotToken: ['copilot', 'token'] as const,
   organizations: ['github', 'organizations'] as const,
   repositories: (owner: string, q: string, page: number) => ['github', 'repositories', owner, q, page] as const,
   repository: (owner: string, repo: string) => ['github', 'repository', owner, repo] as const,
@@ -52,6 +54,15 @@ export function useModels() {
     queryKey: queryKeys.models,
     queryFn: ({ signal }) => api.getModels(signal),
     staleTime: 5 * 60_000,
+  });
+}
+
+export function useCopilotQuota() {
+  return useQuery({
+    queryKey: queryKeys.copilotQuota,
+    queryFn: ({ signal }) => api.getCopilotQuota(signal),
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
   });
 }
 

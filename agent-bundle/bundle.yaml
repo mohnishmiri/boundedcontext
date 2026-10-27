@@ -14,11 +14,13 @@ agent:
 
 prompt:
   template: |
+    You are the `orchestrate` agent. Run the procedure yourself in this session; do not delegate the whole run to another `orchestrate` agent.
     Run the archetype orchestrator for:
-      MS_ROOT_PATH = .{{#scope_path}}/{{scope_path}}{{/scope_path}}
+      MS_ROOT_PATH = {{workspace}}{{#scope_path}}/{{scope_path}}{{/scope_path}}
       SERVICE_NAME = {{repo}}
       ARCHETYPE_PROFILE = {{archetype_profile}}
-    Generate the {{archetype_profile}} archetype pack under `docs/archetypes/` and the bounded context document at `docs/BOUNDED-CONTEXT-{{repo}}.md` using `prompts/universal-bounded-context.prompt.md`.
+    The generator workspace (where `prompts/` lives) is `{{agent_dir}}`: read `{{agent_dir}}/prompts/universal-bounded-context.prompt.md` and `{{agent_dir}}/prompts/batch-subagent.prompt.md` from there. It is read-only; write nothing there.
+    Generate the {{archetype_profile}} archetype pack under `docs/archetypes/` and the bounded context document at `docs/BOUNDED-CONTEXT-{{repo}}.md` inside MS_ROOT_PATH.
 
 inputs:
   - name: archetype_profile
@@ -55,7 +57,7 @@ output:
   max_bytes: 2097152
 
 runtime:
-  timeout_secs: 1800
+  timeout_secs: 18000
   allow_tools: [read, write]
   deny_tools: [shell, url, memory]
   disable_mcp_servers: [github-mcp-server]

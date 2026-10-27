@@ -19,6 +19,10 @@ pub const PUBLISH_STEPS: &[(&str, &str)] = &[
     ("creating_commit", "Creating commit"),
     ("creating_branch", "Creating branch"),
     ("creating_pull_request", "Opening pull request"),
+    ("checking_central_base", "Checking central repository"),
+    ("creating_central_commit", "Creating central repository commit"),
+    ("creating_central_branch", "Creating central repository branch"),
+    ("creating_central_pull_request", "Opening central repository pull request"),
 ];
 
 fn web(web_url: &str, path: &str) -> String {
@@ -71,7 +75,7 @@ pub fn can_publish(job: &JobRow, artifacts: &[ArtifactRow]) -> bool {
         && artifacts.iter().any(|a| a.allowed)
 }
 
-pub fn job(job: &JobRow, artifacts: &[ArtifactRow], web_url: &str) -> Value {
+pub fn job(job: &JobRow, artifacts: &[ArtifactRow], web_url: &str, central_repo: Option<&str>) -> Value {
     let status = job.status();
     let publish_status = job.publish_status();
     let ended = status.is_terminal();
@@ -130,10 +134,19 @@ pub fn job(job: &JobRow, artifacts: &[ArtifactRow], web_url: &str) -> Value {
     v["updated_at"] = json!(job.updated_at);
     v["duration_ms"] = json!(duration_ms);
     v["output"] = output;
+    v["usage"] = job.agent_usage.clone().unwrap_or(Value::Null);
     v["publish"] = json!({
         "status": job.publish_status,
         "stage": job.publish_stage().map(PublishStage::as_str),
         "steps": publish_steps,
+        "title": job.publish_title,
+        "central_available": central_repo.is_some(),
+        "central_requested": job.publish_central,
+        "central_repo": central_repo,
+        "central_branch": job.central_publish_branch,
+        "central_commit_sha": job.central_publish_commit_sha,
+        "central_pr_number": job.central_publish_pr_number,
+        "central_pr_url": job.central_publish_pr_url,
         "branch": job.publish_branch,
         "commit_sha": job.publish_commit_sha,
         "commit_url": commit_url,
