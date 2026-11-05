@@ -101,11 +101,17 @@ async fn generate_review_and_publish() {
         assert_eq!(pulls[0].title, title);
         assert!(pulls[0].body.contains("placeholder agent"));
         assert_eq!(s.branch_head("acme", "shop", "main").as_deref(), Some(main_sha.as_str()), "base branch untouched");
-        let central = "ATT-DP1/apm0014313-ragaflow-ai-context-docs";
+        assert_eq!(job["publish"]["central_repo"], "ATT-DP1/apm0014313-ragaflow-ai-context-docs");
         let central_branch = job["publish"]["central_branch"].as_str().unwrap();
         let central_sha = job["publish"]["central_commit_sha"].as_str().unwrap();
-        assert_eq!(s.branch_head("ATT-DP1", "apm0014313-ragaflow-ai-context-docs", central_branch).as_deref(), Some(central_sha));
-        assert_eq!(s.file_at(central_sha, "docs/shop/bounded-context.md").unwrap(), s.file_at(&commit_sha, "docs/bounded-context.md").unwrap());
+        assert_eq!(
+            s.branch_head("ATT-DP1", "apm0014313-ragaflow-ai-context-docs", central_branch).as_deref(),
+            Some(central_sha)
+        );
+        assert_eq!(
+            s.file_at(central_sha, "docs/shop/bounded-context.md").unwrap(),
+            s.file_at(&commit_sha, "docs/bounded-context.md").unwrap()
+        );
         let central_pulls = s.pulls_for("ATT-DP1", "apm0014313-ragaflow-ai-context-docs");
         assert_eq!(central_pulls.len(), 1);
         assert_eq!(central_pulls[0].title, title);

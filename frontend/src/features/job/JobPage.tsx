@@ -64,22 +64,25 @@ function JobActions({ job }: { job: Job }) {
   });
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap gap-2">
-        {job.can_cancel && (
-          <Button variant="danger" onClick={() => cancel.mutate()} loading={cancel.isPending}>
-            Cancel job
-          </Button>
+    <div className="flex max-w-md flex-col items-end gap-2">
+      <div className="flex flex-wrap justify-end gap-2">
+        {job.status === 'succeeded' && (
+          <a href={api.jobArchiveUrl(job.id)} download className={buttonClass('primary')}>
+            <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor" aria-hidden="true">
+              <path d="M10 3a.75.75 0 0 1 .75.75v7.19l2.22-2.22a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 1 1 1.06-1.06l2.22 2.22V3.75A.75.75 0 0 1 10 3ZM3.75 14a.75.75 0 0 1 .75.75v.5c0 .14.11.25.25.25h10.5a.25.25 0 0 0 .25-.25v-.5a.75.75 0 0 1 1.5 0v.5A1.75 1.75 0 0 1 15.25 17H4.75A1.75 1.75 0 0 1 3 15.25v-.5a.75.75 0 0 1 .75-.75Z" />
+            </svg>
+            Download all (.zip)
+          </a>
         )}
         {job.can_retry && (
           <Button variant="secondary" onClick={() => retry.mutate()} loading={retry.isPending}>
             Retry
           </Button>
         )}
-        {job.status === 'succeeded' && (
-          <a href={api.jobOutputUrl(job.id)} download className={buttonClass('secondary')}>
-            Download output
-          </a>
+        {job.can_cancel && (
+          <Button variant="danger" onClick={() => cancel.mutate()} loading={cancel.isPending}>
+            Cancel job
+          </Button>
         )}
       </div>
       {job.cancel_requested && job.status === 'running' && (
@@ -116,63 +119,71 @@ function JobDetail({ jobId }: { jobId: string }) {
   }
 
   const live = isJobLive(job);
+  const readOnly = job.viewer_is_owner === false;
 
   return (
     <div className="space-y-6">
       <nav aria-label="Breadcrumb" className="text-sm">
-        <Link to="/" className={linkClass}>
-          Jobs
+        <Link to={readOnly ? '/?scope=all' : '/'} className={linkClass}>
+          {readOnly ? 'All jobs' : 'Jobs'}
         </Link>
         <span className="text-gray-400"> / </span>
         <span className="font-mono">{job.short_id}</span>
       </nav>
+
+      {readOnly && (
+        <Alert tone="info" title="Administrator view">
+          You are viewing a job requested by <strong>{job.requested_by}</strong>. Only the requester can cancel or retry
+          it; you can open its pull request on their behalf.
+        </Alert>
+      )}
 
       <p className="sr-only" aria-live="polite" aria-atomic="true">
         {statusAnnouncement(job)}
       </p>
 
       <div className={cardClass}>
-        <JobHeader job={job} live={live} />
+        <JobHeader job={job} live={live} actions={<JobActions job={job} />} />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className={`${cardClass} space-y-4 lg:col-span-1`}>
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold">Progress</h2>
-            <TransportNote transport={transport} />
-          </div>
-          <StepList steps={job.steps} label="Generation steps" />
-          <JobActions job={job} />
+      <section aria-labelledby="progress-heading" className={`${cardClass} space-y-5`}>
+        <div className="flex items-center justify-between gap-3">
+          <h2 id="progress-heading" className="text-base font-semibold">
+            Progress
+          </h2>
+          <TransportNote transport={transport} />
         </div>
+        <StepList steps={job.steps} label="Generation steps" orientation="horizontal" />
+        {job.status === 'failed' && job.error && (
+          <ErrorPanel error={job.error} title="Generation failed">
+            {job.can_retry && <p className="text-sm">Use “Retry” to start a new job with the same settings.</p>}
+          </ErrorPanel>
+        )}
+        {job.status === 'cancelled' && <Alert tone="info">This job was cancelled. Nothing was written to GitHub.</Alert>}
+        {(job.status === 'queued' || job.status === 'running') && (
+          <Alert tone="info" role="status">
+            {job.status === 'queued'
+              ? 'Waiting for a worker to pick up the job.'
+              : `${STAGE_LABELS[job.stage]}. This can take several minutes for large repositories.`}
+          </Alert>
+        )}
+      </section>
 
-        <div className="space-y-6 lg:col-span-2">
-          {job.status === 'failed' && job.error && (
-            <ErrorPanel error={job.error} title="Generation failed">
-              {job.can_retry && <p className="text-sm">Use “Retry” to start a new job with the same settings.</p>}
-            </ErrorPanel>
-          )}
-          {job.status === 'cancelled' && <Alert tone="info">This job was cancelled. Nothing was written to GitHub.</Alert>}
-          {(job.status === 'queued' || job.status === 'running') && (
-            <Alert tone="info" role="status">
-              {job.status === 'queued'
-                ? 'Waiting for a worker to pick up the job.'
-                : `${STAGE_LABELS[job.stage]}. This can take several minutes for large repositories.`}
-            </Alert>
-          )}
-          {job.status === 'succeeded' && (
-            <>
-              <div className={cardClass}>
-                <ReviewPanel job={job} />
-              </div>
-              <div className={cardClass}>
-                <PublishPanel job={job} />
-              </div>
-            </>
-          )}
-          <div className={cardClass}>
-            <LogViewer logs={logs} autoOpen={job.status === 'failed'} />
-          </div>
+      {job.status === 'succeeded' && (
+        <div className={`${cardClass} min-w-0`}>
+          <ReviewPanel job={job} />
         </div>
+      )}
+
+      <div className={job.status === 'succeeded' ? 'grid items-start gap-6 lg:grid-cols-2' : ''}>
+        <div className={`${cardClass} min-w-0`}>
+          <LogViewer logs={logs} autoOpen live={live} />
+        </div>
+        {job.status === 'succeeded' && (
+          <div className={`${cardClass} min-w-0`}>
+            <PublishPanel job={job} readOnly={readOnly} />
+          </div>
+        )}
       </div>
     </div>
   );

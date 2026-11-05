@@ -20,6 +20,8 @@ prompt comes from `bundle.yaml`, and only files matching `output.paths` are ever
      anything copied next to them, such as `prompts/`).
    - `output.paths` / `output.primary` → where the agent writes (glob patterns allowed, e.g.
      `docs/bounded-contexts/*.md`). Leave `primary` out if the agent picks file names itself.
+     `output.strict: false` turns a missing `primary` or one smaller than `min_bytes` into a logged warning so
+     the output is kept for manual review; a run that writes no allowed file at all still fails.
    - `inputs` → only values the agent truly cannot discover itself. Delete the placeholder `scope_path`
      input if the real workflow has no equivalent.
    - `runtime.allow_tools` / `deny_tools` → keep `shell` and `url` denied unless the agent cannot work without

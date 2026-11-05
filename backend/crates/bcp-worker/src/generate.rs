@@ -1,15 +1,17 @@
 //! Generation pipeline: preparing → fetching_repository → running_agent → validating_output → completed.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use bcp_agent::workspace::{capture_base_outputs, collect_outputs, extract_tarball, snapshot, ExtractLimits};
-use bcp_agent::{AgentAdapter, AgentBundle, AgentError, AgentRunRequest, Secret, UsageSummary};
+use bcp_agent::workspace::{
+    capture_base_outputs, collect_outputs, extract_tarball, prepare_output_dirs, snapshot, ExtractLimits,
+};
+use bcp_agent::{AgentAdapter, AgentBundle, AgentError, AgentRunRequest, InputKind, Secret, UsageSummary};
 use bcp_core::domain::{ChangeType, GenerationStage, JobStatus};
-use bcp_core::generators::GeneratorRepo;
+use bcp_core::generators::{GeneratorRepo, BUILTIN_ID};
 use bcp_core::redact::Redactor;
 use bcp_core::steps::StageTracker;
-use bcp_core::{AppError, ErrorCode};
+use bcp_core::{validate, AppError, ErrorCode};
 use bcp_github::GitHubError;
 use bcp_services::generators::ResolvedGenerator;
 use bcp_store::{actions, JobRow, NewArtifact, NewAuditEvent, TaskRow};
@@ -57,6 +59,7 @@ impl Worker {
             Ok(()) => {
                 metrics::counter!("bcp_generations_total", "outcome" => "succeeded").increment(1);
                 self.audit(&job, actions::GENERATION_SUCCEEDED, json!({ "attempt": task.attempts })).await;
+                self.notify_completed(job.id, &logger).await;
                 Verdict::Succeeded
             }
             Err(Outcome::Failed(err)) if err.retryable && task.attempts_left() => {
@@ -191,9 +194,34 @@ impl Worker {
         let agent_dir = scratch.path().join("agent");
         let fetch_started = Instant::now();
         let bytes = guard(ctl, async {
-            gh.download_tarball(&fetch_token, &job.owner, &job.repo, &sha, &tgz, self.cfg.max_repo_bytes)
-                .await
-                .map_err(|e| e.to_service_error())
+            let download =
+                gh.download_tarball(&fetch_token, &job.owner, &job.repo, &sha, &tgz, self.cfg.max_repo_bytes);
+            tokio::pin!(download);
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            tick.tick().await;
+            let result = loop {
+                tokio::select! {
+                    r = &mut download => break r,
+                    _ = tick.tick() => {
+                        if let Ok(meta) = tokio::fs::metadata(&tgz).await {
+                            let mib = meta.len() as f64 / 1_048_576.0;
+                            log.info(&format!("Downloading repository snapshot… {mib:.1} MiB so far")).await;
+                        }
+                    }
+                }
+            };
+            match result {
+                Ok(bytes) => Ok(bytes),
+                Err(e @ GitHubError::Network(_)) => {
+                    log.warn(&format!("Repository snapshot download failed: {e}")).await;
+                    Err(AppError::new(
+                        ErrorCode::GithubUnavailable,
+                        "Downloading the repository snapshot from GitHub failed or timed out. Very large repositories \
+                         or a slow network/proxy can cause this; try again, or pick a smaller branch or repository.",
+                    ))
+                }
+                Err(e) => Err(e.to_service_error()),
+            }
         })
         .await?;
         drop(fetch_token);
@@ -238,6 +266,16 @@ impl Worker {
         std::fs::create_dir_all(&agent_dir)
             .map_err(|e| Outcome::Failed(AppError::internal(format!("agent dir: {e}"))))?;
         let inputs: BTreeMap<String, String> = serde_json::from_value(job.inputs.clone()).unwrap_or_default();
+        let scopes: Vec<String> = bundle
+            .inputs()
+            .iter()
+            .filter(|i| i.kind == InputKind::Path)
+            .filter_map(|i| inputs.get(&i.name).cloned())
+            .collect();
+        let created = prepare_output_dirs(&bundle, &workspace, &scopes);
+        if !created.is_empty() {
+            log.info(&format!("Created output folders for the agent: {}", created.join(", "))).await;
+        }
         let timeout =
             std::time::Duration::from_secs(bundle.manifest.runtime.timeout_secs).min(self.cfg.max_job_timeout);
         let copilot_token = match &self.cfg.copilot_token {
@@ -268,6 +306,8 @@ impl Worker {
         };
         if self.cfg.copilot_token.is_some() {
             log.info("Using the worker's configured Copilot token (BCP_COPILOT_GITHUB_TOKEN) for the agent").await;
+        } else {
+            log.info("Using the requesting user's own Copilot token for the agent").await;
         }
         let agent_started = Instant::now();
         let outcome = adapter.run(req, log, ctl.run.clone()).await;
@@ -311,6 +351,9 @@ impl Worker {
                 u.change, u.path
             ))
             .await;
+        }
+        for w in &report.warnings {
+            log.warn(&format!("Output validation (not enforced, review manually): {w}")).await;
         }
         let mut artifacts: Vec<NewArtifact> = report
             .files
@@ -362,7 +405,10 @@ impl Worker {
         log: &JobLogger,
     ) -> Result<(Arc<AgentBundle>, Arc<dyn AgentAdapter>, Option<Arc<ResolvedGenerator>>), Outcome> {
         if job.generator_source == "builtin" {
-            return Ok((self.bundle.clone(), self.adapter.clone(), None));
+            return match job.generator_id.as_deref() {
+                None | Some(BUILTIN_ID) => Ok((self.bundle.clone(), self.adapter.clone(), None)),
+                Some(id) => self.bundled_generator(job, id, log).await,
+            };
         }
         let (Some(owner), Some(repo), Some(sha)) =
             (job.generator_owner.clone(), job.generator_repo.clone(), job.generator_sha.clone())
@@ -399,6 +445,45 @@ impl Worker {
         .await;
         let adapter = (self.adapters)(resolved.bundle.clone());
         Ok((resolved.bundle.clone(), adapter, Some(resolved)))
+    }
+
+    /// A bundled generator baked into this image under `BCP_GENERATORS_DIR`; trusted like the built-in one.
+    async fn bundled_generator(
+        &self,
+        job: &JobRow,
+        id: &str,
+        log: &JobLogger,
+    ) -> Result<(Arc<AgentBundle>, Arc<dyn AgentAdapter>, Option<Arc<ResolvedGenerator>>), Outcome> {
+        let unavailable = || {
+            Outcome::Failed(
+                AppError::new(
+                    ErrorCode::GeneratorInvalid,
+                    format!("The built-in generator '{id}' is not available on this worker."),
+                )
+                .retryable(false),
+            )
+        };
+        let Some(rel) = job.generator_path.as_deref().filter(|p| validate::relative_path(p).is_ok()) else {
+            return Err(unavailable());
+        };
+        let dir = self.cfg.common.generators_dir.join(rel);
+        let bundle = match tokio::task::spawn_blocking(move || AgentBundle::load(&dir)).await.map_err(blocking_err)? {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                tracing::error!(job_id = %job.id, generator = id, error = %format!("{e:#}"), "bundled generator");
+                return Err(unavailable());
+            }
+        };
+        if bundle.version != job.agent_version {
+            log.warn(&format!(
+                "Generator bundle {} differs from the one validated at request time ({}).",
+                bundle.version, job.agent_version
+            ))
+            .await;
+        }
+        log.info(&format!("Using built-in generator {id} (bundle {})", bundle.version)).await;
+        let adapter = (self.adapters)(bundle.clone());
+        Ok((bundle, adapter, None))
     }
 
     async fn enter(

@@ -21,6 +21,8 @@ prompt:
       ARCHETYPE_PROFILE = {{archetype_profile}}
     The generator workspace (where `prompts/` lives) is `{{agent_dir}}`: read `{{agent_dir}}/prompts/universal-bounded-context.prompt.md` and `{{agent_dir}}/prompts/batch-subagent.prompt.md` from there. It is read-only; write nothing there.
     Generate the {{archetype_profile}} archetype pack under `docs/archetypes/` and the bounded context document at `docs/BOUNDED-CONTEXT-{{repo}}.md` inside MS_ROOT_PATH.
+    The `docs/` and `docs/archetypes/` folders already exist in MS_ROOT_PATH (the portal created them). Write every output file directly to its final path there. Never stage, park or save output anywhere else (session files, temp folders, the generator workspace): only files at those paths are kept. If a write fails, report the exact path and tool error.
+    Tools: only file read, write and search are available. Shell, network and memory tools are disabled by the portal on purpose, so do not try to run commands (builds, tests, git, mkdir, Mermaid CLI). Writing a file creates its folders: never create placeholder files such as `.keep` or `.gitkeep`. Validate Mermaid with the source self-checks in the procedure, and do not report the missing shell as a limitation.
 
 inputs:
   - name: archetype_profile
@@ -55,6 +57,8 @@ output:
     - "**/docs/archetypes/04-ADRs/*.md"
   min_bytes: 64
   max_bytes: 2097152
+  # Keep whatever the agent wrote for manual review instead of failing on min_bytes / primary checks.
+  strict: false
 
 runtime:
   timeout_secs: 18000

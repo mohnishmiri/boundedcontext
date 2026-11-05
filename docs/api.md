@@ -270,8 +270,19 @@ fail the whole request with the usual error envelope before anything is queued. 
 on its own: the ones that pass are queued as independent jobs sharing `batch_id`; the rest are returned in
 `failures` (e.g. `app_not_installed`, `repository_access_denied`, `duplicate_job`, `rate_limited`).
 
-`GET /api/bounded-context/jobs?status=<JobStatus>&owner=&repo=&batch_id=&page=1&per_page=20` → `200 Page<JobSummary>`
-(only the caller's jobs).
+`GET /api/bounded-context/jobs?status=<JobStatus>&scope=mine|all&requested_by=&owner=&repo=&batch_id=&q=&page=1&per_page=20`
+→ `200 Page<JobSummary> & { counts: Record<JobStatus | "all", number>; scope: "mine" | "all" }`.
+`scope=mine` (default) lists the caller's jobs. `scope=all` (administrators only, else `403 forbidden`) lists every
+user's jobs; `requested_by=<login>` narrows it to one requester. `q` (at most 100 characters) keeps jobs whose
+`owner/repo`, branch, requester login or id contains it, case-insensitively. `counts` are per status for the same
+scope and filters, ignoring `status`, so status tiles can show totals.
+
+**Administrators** are the GitHub logins in `BCP_ADMIN_LOGINS` (`GET /api/auth/me` returns `user.is_admin`). They can
+read any job (`GET` job, logs, events, diff, output, archive) and open its pull request on the requester's behalf
+(`POST .../pull-request`, with the administrator's own push access; audited with `on_behalf_of`), but never cancel
+or retry it: for another user's job the API returns `viewer_is_owner: false` and `can_cancel`/`can_retry` false, and
+cancel/retry answer `404`. Each administrator view of another user's job is audited (`admin_job_viewed`).
+Administrators are also copied on every completion email.
 
 `GET /api/bounded-context/jobs/{job_id}` → `200 Job`
 
@@ -294,9 +305,16 @@ fall back to polling `GET /jobs/{id}` + `/logs` if SSE fails.
 
 `GET /api/bounded-context/jobs/{job_id}/output` → `200 text/markdown` (primary output file, download)
 
-`POST /api/bounded-context/jobs/{job_id}/pull-request` `{ title: string, publish_central?: boolean }` → `202 Job`
+`GET /api/bounded-context/jobs/{job_id}/archive` → `200 application/zip` — every generated file, as
+`<repo>/<path>` entries, named `<repo>-<short_id>-docs.zip` (only when `status = succeeded`, else `409 conflict`).
+
+`POST /api/bounded-context/jobs/{job_id}/pull-request`
+`{ title: string, publish_central?: boolean, central_repo?: "owner/repo", reviewers?: string[] }` → `202 Job`
 with `publish.status = "queued"`. The title is required (1–256 characters) and is used unchanged for the source PR
-and, when `publish_central` is true, for the PR in `BCP_CENTRAL_REPO`; the organisation's PR-title policy validates
+and, when `publish_central` is true, for the central PR. The central repository is `central_repo` when given (any
+repository the user can push to), else the generator's `central_repo` from the registry, else `BCP_CENTRAL_REPO`.
+`reviewers` (at most 10 GitHub logins, not the requester's own) are requested on every PR opened; GitHub refusing a
+reviewer is logged on the job and does not fail the publish.
 it on GitHub. Central files are written below `docs/<source-repo>/` on a new branch from the central repository's
 default branch.
 Idempotent: if already queued/running/succeeded returns `200 Job` unchanged. `409 conflict` if the job has not

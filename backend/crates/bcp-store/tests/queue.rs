@@ -4,9 +4,12 @@
 use bcp_core::domain::JobStatus;
 use bcp_core::{AppError, ErrorCode};
 use bcp_store::{
-    CancelOutcome, JobFilter, JobGenerator, NewArtifact, NewAuditEvent, NewJob, NewUserGenerator, PublishOutcome,
-    Store, StoreError,
+    CancelOutcome, JobFilter, JobGenerator, NewArtifact, NewAuditEvent, NewJob, NewUserGenerator, PublishOptions,
+    PublishOutcome, Store, StoreError,
 };
+
+const PUBLISH: PublishOptions<'static> =
+    PublishOptions { title: "APM-123: Update context", central_repo: None, reviewers: &[], as_admin: false };
 use serde_json::json;
 use uuid::Uuid;
 
@@ -148,7 +151,7 @@ async fn completion_artifacts_publish_and_audit() {
     let user = store.upsert_user(1, "octocat", Some("Mona"), None).await.unwrap();
     let job = store.create_job(new_job(user.id, "main")).await.unwrap();
     assert!(matches!(
-        store.request_publish(user.id, job.id, 5, &json!({}), "APM-123: Update context", false).await,
+        store.request_publish(user.id, job.id, 5, &json!({}), &PUBLISH).await,
         Err(StoreError::Conflict(_))
     ));
     store.start_job(job.id, &json!({})).await.unwrap();
@@ -191,11 +194,11 @@ async fn completion_artifacts_publish_and_audit() {
     assert_eq!(store.list_artifacts(job.id).await.unwrap().len(), 2);
 
     assert!(matches!(
-        store.request_publish(user.id, job.id, 5, &json!({}), "APM-123: Update context", false).await.unwrap(),
+        store.request_publish(user.id, job.id, 5, &json!({}), &PUBLISH).await.unwrap(),
         PublishOutcome::Queued(_)
     ));
     assert!(matches!(
-        store.request_publish(user.id, job.id, 5, &json!({}), "APM-123: Update context", false).await.unwrap(),
+        store.request_publish(user.id, job.id, 5, &json!({}), &PUBLISH).await.unwrap(),
         PublishOutcome::Unchanged(_)
     ));
 
@@ -276,10 +279,27 @@ async fn generators_batches_and_saved_generators() {
     assert_eq!(second.generator_sha.as_deref(), Some("f".repeat(40).as_str()));
 
     let filter = JobFilter { batch_id: Some(batch), ..Default::default() };
-    let (rows, total) = store.list_jobs(user.id, &filter, 1, 50).await.unwrap();
+    let (rows, total) = store.list_jobs(Some(user.id), &filter, 1, 50).await.unwrap();
     assert_eq!((rows.len(), total), (2, 2));
+    let counts = store.count_jobs_by_status(Some(user.id), &filter).await.unwrap();
+    assert_eq!(counts.iter().map(|(_, n)| n).sum::<i64>(), 2);
+    // Administrators see every user's jobs; the requester filter narrows by login.
+    let by_login = JobFilter { requested_by: Some(user.login.to_uppercase()), ..filter.clone() };
+    let (rows, _) = store.list_jobs(None, &by_login, 1, 50).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    let nobody = JobFilter { requested_by: Some("nobody".into()), ..filter.clone() };
+    assert!(store.list_jobs(None, &nobody, 1, 50).await.unwrap().0.is_empty());
+    // Free-text search matches repository, branch, requester or id, case-insensitively.
+    let by_text = JobFilter { search: Some("MAIN".into()), ..filter.clone() };
+    let (rows, total) = store.list_jobs(Some(user.id), &by_text, 1, 50).await.unwrap();
+    assert_eq!((rows.len(), total), (2, 2));
+    let by_id = JobFilter { search: Some(first.id.to_string()[..8].to_owned()), ..filter.clone() };
+    assert_eq!(store.list_jobs(Some(user.id), &by_id, 1, 50).await.unwrap().1, 1);
+    let no_match = JobFilter { search: Some("no-such-repo".into()), ..filter.clone() };
+    assert_eq!(store.list_jobs(Some(user.id), &no_match, 1, 50).await.unwrap().1, 0);
+    assert_eq!(store.count_jobs_by_status(Some(user.id), &no_match).await.unwrap().len(), 0);
     let (rows, total) = store
-        .list_jobs(user.id, &JobFilter { batch_id: Some(Uuid::new_v4()), ..Default::default() }, 1, 50)
+        .list_jobs(Some(user.id), &JobFilter { batch_id: Some(Uuid::new_v4()), ..Default::default() }, 1, 50)
         .await
         .unwrap();
     assert_eq!((rows.len(), total), (0, 0));

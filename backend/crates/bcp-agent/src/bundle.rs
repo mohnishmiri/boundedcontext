@@ -88,6 +88,13 @@ pub struct OutputSection {
     pub min_bytes: u64,
     #[serde(default = "default_max_bytes")]
     pub max_bytes: u64,
+    /// When false, a missing primary file or one below `min_bytes` is a warning, not a failed job.
+    #[serde(default = "default_strict")]
+    pub strict: bool,
+}
+
+fn default_strict() -> bool {
+    true
 }
 
 fn default_min_bytes() -> u64 {

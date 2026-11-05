@@ -53,17 +53,32 @@ compose() { docker compose "$@"; }
 # Something is listening on 127.0.0.1:<port>?
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
 
+# Windows (Hyper-V, WSL, Docker Desktop) reserves TCP ranges that nothing listens on but that cannot be bound.
+EXCLUDED_RANGES=""
+if command -v netsh.exe >/dev/null 2>&1; then
+  EXCLUDED_RANGES=$(netsh.exe interface ipv4 show excludedportrange protocol=tcp 2>/dev/null | tr -d '\r' |
+    awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { print $1 "-" $2 }')
+fi
+port_excluded() {
+  local r
+  for r in $EXCLUDED_RANGES; do
+    if (( $1 >= ${r%-*} && $1 <= ${r#*-} )); then return 0; fi
+  done
+  return 1
+}
+port_unavailable() { port_in_use "$1" || port_excluded "$1"; }
+
 # First free port: the preferred one, else the first free one in [from, from+50).
 pick_port() {
   local preferred=$1 from=$2 p
-  if ! port_in_use "$preferred"; then echo "$preferred"; return; fi
+  if ! port_unavailable "$preferred"; then echo "$preferred"; return; fi
   for ((p = from; p < from + 50; p++)); do
-    if ! port_in_use "$p"; then echo "$p"; return; fi
+    if ! port_unavailable "$p"; then echo "$p"; return; fi
   done
   return 1
 }
 
-# Host port a running service publishes for <container port>, e.g. "55432".
+# Host port a running service publishes for <container port>, e.g. "15432".
 published_port() { compose port "$1" "$2" 2>/dev/null | sed 's/.*://' | head -n1; }
 
 running() { [ -n "$(compose ps --status running -q "$1" 2>/dev/null)" ]; }
@@ -96,24 +111,42 @@ if [ -n "${BCP_COPILOT_GITHUB_TOKEN:-}" ]; then
   warn "BCP_COPILOT_GITHUB_TOKEN is set: every job will use that one Copilot account instead of the requester's."
 fi
 
+# ---- database ------------------------------------------------------------------------------------------------
+# BCP_EXTERNAL_DATABASE_URL (e.g. Azure Database for PostgreSQL) replaces the local postgres container.
+if [ -n "${BCP_EXTERNAL_DATABASE_URL:-}" ]; then
+  EXTERNAL_DB=1
+  # host[:port]/database of the URL, never the credentials.
+  DB_DISPLAY=$(printf '%s' "$BCP_EXTERNAL_DATABASE_URL" | sed -E 's#^[a-z]+://([^@]*@)*##; s#\?.*$##')
+  export COMPOSE_PROFILES=""
+else
+  EXTERNAL_DB=0
+  export COMPOSE_PROFILES=local-db
+fi
+running_db() { [ "$EXTERNAL_DB" = 1 ] || running postgres; }
+
 # ---- ports ---------------------------------------------------------------------------------------------------
 if [ "$FRESH" = 1 ]; then
   info "Removing containers, database and dev secrets (--fresh)"
   compose down -v --remove-orphans >/dev/null 2>&1 || true
 fi
 
-if running frontend && running api && running mock-github && running postgres; then
+if running frontend && running api && running mock-github && running_db; then
   # Keep the ports of the running stack so URLs and sessions stay valid.
   UI_PORT=$(published_port frontend 8080)
   API_PORT=$(published_port api 8080)
-  PG_PORT=$(published_port postgres 5432)
+  if [ "$EXTERNAL_DB" = 1 ]; then PG_PORT=${BCP_PG_PORT:-5432}; else PG_PORT=$(published_port postgres 5432); fi
   MOCK_PORT=$(published_port mock-github 9000)
   ALREADY_UP=1
 else
   ALREADY_UP=0
   UI_PORT=${BCP_UI_PORT:-$(pick_port 3000 3001)} || die "No free port for the UI (tried 3000, 3001-3050)."
-  API_PORT=${BCP_API_PORT:-$(pick_port 8080 58080)} || die "No free port for the API (tried 8080, 58080-58129)."
-  PG_PORT=${BCP_PG_PORT:-$(pick_port 5432 55432)} || die "No free port for PostgreSQL (tried 5432, 55432-55481)."
+  # Fallbacks stay below 49152: Windows reserves blocks of its dynamic range (49152-65535) for Hyper-V/WSL.
+  API_PORT=${BCP_API_PORT:-$(pick_port 8080 18080)} || die "No free port for the API (tried 8080, 18080-18129)."
+  if [ "$EXTERNAL_DB" = 1 ]; then
+    PG_PORT=${BCP_PG_PORT:-5432}
+  else
+    PG_PORT=${BCP_PG_PORT:-$(pick_port 5432 15432)} || die "No free port for PostgreSQL (tried 5432, 15432-15481)."
+  fi
   MOCK_PORT=${BCP_MOCK_PORT:-$(pick_port 9000 9001)} || die "No free port for the mock GitHub (tried 9000, 9001-9050)."
   # Only mention ports that were moved automatically (not ones forced through BCP_*_PORT).
   for pair in "UI:$UI_PORT:3000:${BCP_UI_PORT:-}" "API:$API_PORT:8080:${BCP_API_PORT:-}" \
@@ -176,7 +209,14 @@ else
   row "Mock GitHub" "http://localhost:$MOCK_PORT" "sign in as octocat (push access) or viewer (read-only)"
 fi
 row "API" "http://localhost:$API_PORT" "/readyz, /api/…"
-row "PostgreSQL" "postgres://bcp:bcp@localhost:$PG_PORT/bcp"
+if [ "$EXTERNAL_DB" = 1 ]; then
+  row "PostgreSQL" "$DB_DISPLAY" "external (BCP_EXTERNAL_DATABASE_URL)"
+else
+  row "PostgreSQL" "postgres://bcp:bcp@localhost:$PG_PORT/bcp"
+fi
+if [ -n "${BCP_ADMIN_LOGINS:-}" ]; then
+  row "Admins" "$BCP_ADMIN_LOGINS" "can view every user's jobs"
+fi
 cat <<EOF
 
   Agent runtime: fake Copilot CLI (test double); agent bundle: placeholder.

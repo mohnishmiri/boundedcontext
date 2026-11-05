@@ -1,8 +1,9 @@
-{{- if and .Values.migrations.enabled .Values.api.enabled }}
+{{- if and .Values.migrations.enabled .Values.api.enabled (ne .Values.secrets.mode "akv2k8s") }}
 {{- /*
 Hooks run before regular release resources exist, so the migration Job brings its own ServiceAccount and
 SecretProviderClass as lower-weight hook resources. The migrate identity (default: the api identity) needs a
-federated credential for serviceAccounts.migrate.name.
+federated credential for serviceAccounts.migrate.name. With secrets.mode=akv2k8s the synced Secrets do not exist
+yet at pre-install time, so the api runs the migrations at start-up instead (see configmap.yaml).
 */}}
 apiVersion: v1
 kind: ServiceAccount

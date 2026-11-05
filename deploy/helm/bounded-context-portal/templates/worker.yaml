@@ -192,6 +192,6 @@ spec:
   secretTargetRef:
     - parameter: connection
       name: {{ include "bcp.kedaConnectionSecretName" . }}
-      key: {{ .Values.keda.connectionSecret.key }}
+      key: {{ include "bcp.kedaConnectionSecretKey" . }}
 {{- end }}
 {{- end }}

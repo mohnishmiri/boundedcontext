@@ -73,6 +73,17 @@ impl Store {
             .await?)
     }
 
+    /// The most recently signed-in user with this login (case-insensitive).
+    pub async fn get_user_by_login(&self, login: &str) -> Result<Option<UserRow>> {
+        Ok(sqlx::query_as::<_, UserRow>(
+            "SELECT id, github_id, login, name, avatar_url FROM users WHERE lower(login) = lower($1)
+              ORDER BY last_login_at DESC NULLS LAST LIMIT 1",
+        )
+        .bind(login)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn store_tokens(
         &self,
         user_id: Uuid,

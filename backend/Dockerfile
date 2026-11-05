@@ -43,9 +43,11 @@ COPY --from=build /etc/ssl/certs/ca-certificates-extra.crt /etc/ssl/certs/ca-cer
 COPY --from=build /out/bcp-api /usr/local/bin/bcp-api
 # The API reads the agent bundle (GET /api/agent, input validation, model lock) and the model catalog.
 COPY agent-bundle/ /opt/agent-bundle/
+COPY generators/ /opt/generators/
 COPY config/models.yaml /etc/bcp/models.yaml
 COPY config/generators.yaml /etc/bcp/generators.yaml
 ENV BCP_AGENT_BUNDLE_DIR=/opt/agent-bundle \
+    BCP_GENERATORS_DIR=/opt/generators \
     BCP_MODELS_FILE=/etc/bcp/models.yaml \
     BCP_GENERATORS_FILE=/etc/bcp/generators.yaml \
     BCP_WORK_DIR=/tmp/bcp-work \
@@ -78,8 +80,10 @@ RUN --mount=type=secret,id=corporate_ca,required=false \
  && mkdir -p /work && chown 10001:10001 /work
 COPY --from=build /out/bcp-worker /out/bcp-agent-run /usr/local/bin/
 COPY agent-bundle/ /opt/agent-bundle/
+COPY generators/ /opt/generators/
 COPY config/models.yaml /etc/bcp/models.yaml
 ENV BCP_AGENT_BUNDLE_DIR=/opt/agent-bundle \
+    BCP_GENERATORS_DIR=/opt/generators \
     BCP_MODELS_FILE=/etc/bcp/models.yaml \
     BCP_COPILOT_BIN=/usr/local/bin/copilot \
     BCP_WORK_DIR=/work \

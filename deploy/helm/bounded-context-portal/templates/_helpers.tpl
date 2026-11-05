@@ -92,7 +92,7 @@ seccompProfile:
 
 {{/* usage: include "bcp.podIdentityLabels" $ */}}
 {{- define "bcp.podIdentityLabels" -}}
-{{- if .Values.workloadIdentity.podLabel }}
+{{- if and .Values.workloadIdentity.podLabel (ne .Values.secrets.mode "akv2k8s") }}
 azure.workload.identity/use: "true"
 {{- end }}
 {{- end -}}
@@ -113,8 +113,27 @@ array:
 {{- end }}
 {{- end -}}
 
+{{/* Kubernetes Secret that akv2k8s syncs one Key Vault object into. usage: include "bcp.akvSecretName" (dict "ctx" $ "object" "database-url") */}}
+{{- define "bcp.akvSecretName" -}}
+{{- printf "%s-%s" (include "bcp.fullname" .ctx) .object | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "bcp.kedaConnectionSecretName" -}}
-{{- default (include "bcp.syncedDbSecretName" .) .Values.keda.connectionSecret.name -}}
+{{- if .Values.keda.connectionSecret.name -}}
+{{- .Values.keda.connectionSecret.name -}}
+{{- else if eq .Values.secrets.mode "akv2k8s" -}}
+{{- include "bcp.akvSecretName" (dict "ctx" . "object" .Values.secrets.keyVault.objects.databaseUrl) -}}
+{{- else -}}
+{{- include "bcp.syncedDbSecretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "bcp.kedaConnectionSecretKey" -}}
+{{- if and (not .Values.keda.connectionSecret.name) (eq .Values.secrets.mode "akv2k8s") -}}
+{{- .Values.secrets.keyVault.objects.databaseUrl -}}
+{{- else -}}
+{{- .Values.keda.connectionSecret.key -}}
+{{- end -}}
 {{- end -}}
 
 {{/* usage: include "bcp.secretVolume" (dict "ctx" $ "component" "api") — component: api | worker | migrate */}}
@@ -127,6 +146,19 @@ array:
     readOnly: true
     volumeAttributes:
       secretProviderClass: {{ printf "%s-%s" (include "bcp.fullname" .ctx) .component }}
+{{- else if eq $v.secrets.mode "akv2k8s" }}
+{{- $names := list $v.secrets.keyVault.objects.databaseUrl }}
+{{- if ne .component "migrate" }}{{ $names = include "bcp.secretObjectNames" (dict "ctx" .ctx "component" .component) | fromJsonArray }}{{ end }}
+  projected:
+    defaultMode: 0440
+    sources:
+{{- range $names }}
+      - secret:
+          name: {{ include "bcp.akvSecretName" (dict "ctx" $.ctx "object" .) }}
+          items:
+            - key: {{ . }}
+              path: {{ . }}
+{{- end }}
 {{- else }}
   secret:
     secretName: {{ required "secrets.existingSecret is required when secrets.mode=existingSecret" $v.secrets.existingSecret }}
@@ -134,18 +166,47 @@ array:
 {{- end }}
 {{- end -}}
 
-{{/* *_FILE env vars. usage: include "bcp.secretFileEnv" (dict "ctx" $ "all" true) — migrate only needs the DB URL */}}
+{{/*
+Key Vault object names a component needs. Optional secrets are only requested when their feature is configured,
+so Key Vault never has to hold placeholders (a missing object makes the CSI mount, and the pod, fail).
+usage: include "bcp.secretObjectNames" (dict "ctx" $ "component" "api") | fromJsonArray
+*/}}
+{{- define "bcp.secretObjectNames" -}}
+{{- $v := .ctx.Values -}}
+{{- $o := $v.secrets.keyVault.objects -}}
+{{- $names := list $o.databaseUrl $o.tokenEncryptionKey -}}
+{{- if $v.config.github.clientId }}{{ $names = append $names $o.githubClientSecret }}{{ end -}}
+{{- if $v.config.github.appId }}{{ $names = append $names $o.githubAppPrivateKey }}{{ end -}}
+{{- if and (eq .component "worker") $v.secrets.copilotSharedToken }}{{ $names = append $names $o.copilotGithubToken }}{{ end -}}
+{{- if and (eq .component "worker") $v.config.smtp.host $v.config.smtp.user }}{{ $names = append $names $o.smtpPassword }}{{ end -}}
+{{- toJson $names -}}
+{{- end -}}
+
+{{/* *_FILE env vars. usage: include "bcp.secretFileEnv" (dict "ctx" $ "all" true "component" "api") — migrate only needs the DB URL */}}
 {{- define "bcp.secretFileEnv" -}}
-{{- $s := .ctx.Values.secrets -}}
+{{- $v := .ctx.Values -}}
+{{- $s := $v.secrets -}}
 - name: BCP_DATABASE_URL_FILE
   value: {{ printf "%s/%s" $s.mountPath $s.keyVault.objects.databaseUrl | quote }}
 {{- if .all }}
-- name: BCP_GITHUB_CLIENT_SECRET_FILE
-  value: {{ printf "%s/%s" $s.mountPath $s.keyVault.objects.githubClientSecret | quote }}
-- name: BCP_GITHUB_PRIVATE_KEY_FILE
-  value: {{ printf "%s/%s" $s.mountPath $s.keyVault.objects.githubAppPrivateKey | quote }}
 - name: BCP_TOKEN_ENCRYPTION_KEY_FILE
   value: {{ printf "%s/%s" $s.mountPath $s.keyVault.objects.tokenEncryptionKey | quote }}
+{{- if $v.config.github.clientId }}
+- name: BCP_GITHUB_CLIENT_SECRET_FILE
+  value: {{ printf "%s/%s" $s.mountPath $s.keyVault.objects.githubClientSecret | quote }}
+{{- end }}
+{{- if $v.config.github.appId }}
+- name: BCP_GITHUB_PRIVATE_KEY_FILE
+  value: {{ printf "%s/%s" $s.mountPath $s.keyVault.objects.githubAppPrivateKey | quote }}
+{{- end }}
+{{- if and (eq (default "" .component) "worker") $s.copilotSharedToken }}
+- name: BCP_COPILOT_GITHUB_TOKEN_FILE
+  value: {{ printf "%s/%s" $s.mountPath $s.keyVault.objects.copilotGithubToken | quote }}
+{{- end }}
+{{- if and (eq (default "" .component) "worker") $v.config.smtp.host $v.config.smtp.user }}
+- name: SMTP_PASSWORD_FILE
+  value: {{ printf "%s/%s" $s.mountPath $s.keyVault.objects.smtpPassword | quote }}
+{{- end }}
 {{- end }}
 {{- end -}}
 
@@ -278,7 +339,7 @@ containers:
         valueFrom:
           fieldRef:
             fieldPath: metadata.name
-      {{- include "bcp.secretFileEnv" (dict "ctx" $ctx "all" true) | nindent 6 }}
+      {{- include "bcp.secretFileEnv" (dict "ctx" $ctx "all" true "component" "worker") | nindent 6 }}
     {{- if not .once }}
     ports:
       - name: http

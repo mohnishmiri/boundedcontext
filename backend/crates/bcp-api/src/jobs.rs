@@ -10,7 +10,7 @@ use bcp_core::domain::{JobStatus, PublishStatus};
 use bcp_core::generators::BUILTIN_ID;
 use bcp_core::{validate, AppError, ErrorCode};
 use bcp_github::GitHubError;
-use bcp_store::{actions, CancelOutcome, JobFilter, JobRow, NewAuditEvent, NewJob, PublishOutcome};
+use bcp_store::{actions, CancelOutcome, JobFilter, JobRow, NewAuditEvent, NewJob, PublishOptions, PublishOutcome};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -67,6 +67,15 @@ fn parse_job_id(raw: &str) -> Result<Uuid, AppError> {
     Uuid::parse_str(raw).map_err(|_| AppError::not_found("Job"))
 }
 
+/// A job the user may read: their own or, for administrators, anyone's. Changing a job always requires
+/// ownership (`Store::get_user_job`).
+pub(crate) async fn readable_job(state: &AppState, user: &CurrentUser, id: Uuid) -> Result<JobRow, AppError> {
+    if user.is_admin {
+        return state.store.get_job(id).await?.ok_or_else(|| AppError::not_found("Job"));
+    }
+    Ok(state.store.get_user_job(user.user.id, id).await?)
+}
+
 async fn audit(state: &AppState, user: &CurrentUser, action: &str, job: &JobRow, details: Value) {
     state
         .store
@@ -84,15 +93,34 @@ async fn audit(state: &AppState, user: &CurrentUser, action: &str, job: &JobRow,
 }
 
 pub(crate) async fn job_json(state: &AppState, job: &JobRow) -> Result<Value, AppError> {
+    job_json_as(state, job, true).await
+}
+
+/// The job as seen by its owner, or by an administrator viewing another user's job (`owner_view == false`): they
+/// may only publish it on the requester's behalf (their own push access is checked when they do).
+pub(crate) async fn job_json_as(state: &AppState, job: &JobRow, owner_view: bool) -> Result<Value, AppError> {
     let artifacts =
         if job.status() == JobStatus::Succeeded { state.store.list_artifacts(job.id).await? } else { Vec::new() };
-    let central_repo = state
-        .cfg
-        .common
-        .central_repository
-        .as_ref()
-        .map(|(owner, repo)| format!("{owner}/{repo}"));
-    Ok(view::job(job, &artifacts, state.github.web_url().as_str(), central_repo.as_deref()))
+    let central_repo = job
+        .central_publish_repo
+        .clone()
+        .or_else(|| central_repo_for(state, job).map(|(owner, repo)| format!("{owner}/{repo}")));
+    let mut v = view::job(job, &artifacts, state.github.web_url().as_str(), central_repo.as_deref());
+    v["viewer_is_owner"] = json!(owner_view);
+    if !owner_view {
+        v["can_cancel"] = json!(false);
+        v["can_retry"] = json!(false);
+        v["can_publish"] = json!(view::can_publish_as_admin(job, &artifacts));
+    }
+    Ok(v)
+}
+
+/// The central repository for this job's generator: the registry's `central_repo`, else `BCP_CENTRAL_REPO`.
+fn central_repo_for(state: &AppState, job: &JobRow) -> Option<(String, String)> {
+    match state.registry.central_repo_for(job.generator_id.as_deref()).and_then(|v| v.split_once('/')) {
+        Some((owner, repo)) => Some((owner.to_owned(), repo.to_owned())),
+        None => state.cfg.common.central_repository.clone(),
+    }
 }
 
 /// Everything about a request that is the same for every repository in it: the chosen generator, the validated
@@ -140,6 +168,10 @@ async fn prepare_with(
              Requests' permission, which needs no organisation approval.",
         ));
     }
+    let copilot = state.tokens.copilot_run_token(user.user.id).await?;
+    if !state.cfg.copilot_shared_token {
+        crate::copilot_token::ensure_copilot_accepts(state, &copilot).await?;
+    }
     let model = match generator.bundle.locked_model() {
         Some(locked) if model != locked => {
             return Err(AppError::new(
@@ -149,10 +181,7 @@ async fn prepare_with(
             .with_details(json!({ "locked_model": locked })))
         }
         Some(locked) => locked.to_owned(),
-        None => {
-            let copilot = state.tokens.copilot_run_token(user.user.id).await?;
-            models::model_list(state, user.user.id, &copilot).await.validate(model)?.id.clone()
-        }
+        None => models::model_list(state, user.user.id, &copilot).await.validate(model)?.id.clone(),
     };
     let inputs = generator.bundle.validate_inputs(raw_inputs)?;
     Ok(RequestContext { token, generator, model, inputs, batch_id })
@@ -333,9 +362,15 @@ pub async fn create_batch(
 #[derive(Deserialize)]
 pub struct ListQuery {
     status: Option<String>,
+    /// `mine` (default) or `all` (administrators).
+    scope: Option<String>,
+    /// Requester login; administrators with `scope=all` only.
+    requested_by: Option<String>,
     owner: Option<String>,
     repo: Option<String>,
     batch_id: Option<String>,
+    /// Free-text search over repository, branch, requester and job id.
+    q: Option<String>,
     page: Option<u32>,
     per_page: Option<u32>,
 }
@@ -367,19 +402,51 @@ pub async fn list(
     if per_page == 0 || per_page > 100 {
         return Err(AppError::validation([("per_page", "Must be between 1 and 100")]).into());
     }
-    let (rows, total) =
-        state.store.list_jobs(user.user.id, &JobFilter { status, owner, repo, batch_id }, page, per_page).await?;
+    let all_users = match q.scope.as_deref().unwrap_or("mine") {
+        "mine" => false,
+        "all" if user.is_admin => true,
+        "all" => {
+            return Err(AppError::new(ErrorCode::Forbidden, "Only administrators can see every user's jobs.").into())
+        }
+        _ => return Err(AppError::validation([("scope", "Must be 'mine' or 'all'")]).into()),
+    };
+    let requested_by = q.requested_by.map(|s| s.trim().trim_start_matches('@').to_owned()).filter(|s| !s.is_empty());
+    if let Some(r) = &requested_by {
+        if !all_users {
+            return Err(AppError::validation([("requested_by", "Only available with scope=all")]).into());
+        }
+        validate::user_login(r).map_err(|e| AppError::validation([("requested_by", e)]))?;
+    }
+    let scope = (!all_users).then_some(user.user.id);
+    let search = q.q.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    if search.as_ref().is_some_and(|s| s.chars().count() > 100 || s.chars().any(char::is_control)) {
+        return Err(AppError::validation([("q", "At most 100 characters, no control characters")]).into());
+    }
+    let filter = JobFilter { status, owner, repo, batch_id, requested_by, search };
+    let (rows, total) = state.store.list_jobs(scope, &filter, page, per_page).await?;
+    let mut counts = json!({ "all": 0, "queued": 0, "running": 0, "succeeded": 0, "failed": 0, "cancelled": 0 });
+    let mut all = 0;
+    for (status, n) in state.store.count_jobs_by_status(scope, &filter).await? {
+        all += n;
+        counts[status] = json!(n);
+    }
+    counts["all"] = json!(all);
     let has_more = i64::from(page) * i64::from(per_page) < total;
     Ok(Json(json!({
         "items": rows.iter().map(view::summary).collect::<Vec<_>>(),
-        "page": page, "per_page": per_page, "has_more": has_more, "total": total,
+        "page": page, "per_page": per_page, "has_more": has_more, "total": total, "counts": counts,
+        "scope": if all_users { "all" } else { "mine" },
     })))
 }
 
 /// `GET /api/bounded-context/jobs/{id}`
 pub async fn get(State(state): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    let job = state.store.get_user_job(user.user.id, parse_job_id(&id)?).await?;
-    Ok(Json(job_json(&state, &job).await?))
+    let job = readable_job(&state, &user, parse_job_id(&id)?).await?;
+    let owner_view = job.user_id == user.user.id;
+    if !owner_view {
+        audit(&state, &user, "admin_job_viewed", &job, json!({ "requested_by": job.requested_by })).await;
+    }
+    Ok(Json(job_json_as(&state, &job, owner_view).await?))
 }
 
 #[derive(Deserialize)]
@@ -395,7 +462,7 @@ pub async fn logs(
     Path(id): Path<String>,
     ApiQuery(q): ApiQuery<LogsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let job = state.store.get_user_job(user.user.id, parse_job_id(&id)?).await?;
+    let job = readable_job(&state, &user, parse_job_id(&id)?).await?;
     let after = q.after.unwrap_or(0).max(0);
     let limit = q.limit.unwrap_or(200).clamp(1, 500);
     let items = state.store.list_events(job.id, after, limit).await?;
@@ -405,7 +472,7 @@ pub async fn logs(
 
 /// `GET /api/bounded-context/jobs/{id}/diff`
 pub async fn diff(State(state): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    let job = state.store.get_user_job(user.user.id, parse_job_id(&id)?).await?;
+    let job = readable_job(&state, &user, parse_job_id(&id)?).await?;
     if job.status() != JobStatus::Succeeded {
         return Err(AppError::conflict("The diff is available once generation has succeeded.").into());
     }
@@ -430,7 +497,7 @@ pub async fn diff(State(state): State<AppState>, user: CurrentUser, Path(id): Pa
 
 /// `GET /api/bounded-context/jobs/{id}/output` — the primary Markdown file as a download.
 pub async fn output(State(state): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> ApiResult<Response> {
-    let job = state.store.get_user_job(user.user.id, parse_job_id(&id)?).await?;
+    let job = readable_job(&state, &user, parse_job_id(&id)?).await?;
     if job.status() != JobStatus::Succeeded {
         return Err(AppError::conflict("The output is available once generation has succeeded.").into());
     }
@@ -454,27 +521,122 @@ pub async fn output(State(state): State<AppState>, user: CurrentUser, Path(id): 
     Ok(resp)
 }
 
+/// Largest archive the API builds in memory (generated documentation is a few MiB at most).
+const MAX_ARCHIVE_BYTES: i64 = 64 * 1024 * 1024;
+
+/// `GET /api/bounded-context/jobs/{id}/archive` — every generated file as a ZIP, under `<repo>/<path>`.
+pub async fn archive(State(state): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> ApiResult<Response> {
+    let job = readable_job(&state, &user, parse_job_id(&id)?).await?;
+    if job.status() != JobStatus::Succeeded {
+        return Err(AppError::conflict("The output is available once generation has succeeded.").into());
+    }
+    let artifacts: Vec<_> = state.store.list_artifacts(job.id).await?.into_iter().filter(|a| a.allowed).collect();
+    if artifacts.is_empty() {
+        return Err(AppError::not_found("Output").into());
+    }
+    if artifacts.iter().map(|a| a.size_bytes).sum::<i64>() > MAX_ARCHIVE_BYTES {
+        return Err(AppError::conflict("The output is too large to download as one archive.").into());
+    }
+    let root = safe_file_name(&job.repo, "output");
+    let bytes = tokio::task::spawn_blocking(move || {
+        let mut zip = crate::zip::ZipWriter::default();
+        for a in &artifacts {
+            // Stored paths passed `validate::relative_path` when the worker collected them.
+            zip.add(&format!("{root}/{}", a.path), a.new_content.as_deref().unwrap_or_default().as_bytes())?;
+        }
+        zip.finish()
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("building archive: {e}")))?
+    .map_err(|e| AppError::internal(format!("building archive: {e}")))?;
+    let filename = format!("{}-{}-docs.zip", safe_file_name(&job.repo, "output"), job.short_id());
+    let mut resp = bytes.into_response();
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok(resp)
+}
+
+/// `raw` reduced to `[A-Za-z0-9._-]` for use in file names; `fallback` when nothing remains.
+fn safe_file_name(raw: &str, fallback: &str) -> String {
+    let s: String = raw.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+    let s = s.trim_start_matches('.').to_owned();
+    if s.is_empty() {
+        fallback.to_owned()
+    } else {
+        s
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishRequest {
     pub title: String,
     #[serde(default)]
     pub publish_central: bool,
+    /// GitHub logins asked to review the pull request(s).
+    #[serde(default)]
+    pub reviewers: Vec<String>,
+    /// `owner/repo` for the central pull request instead of the generator's default.
+    #[serde(default)]
+    pub central_repo: Option<String>,
 }
 
-/// `POST /api/bounded-context/jobs/{id}/pull-request`
+/// `owner/repo` typed by the user, validated like every other repository identifier.
+fn parse_repo_slug(raw: &str) -> Result<(String, String), AppError> {
+    let invalid = || AppError::validation([("central_repo", "Enter the repository as owner/repository.")]);
+    let (owner, repo) = raw.trim().split_once('/').ok_or_else(invalid)?;
+    if validate::owner(owner).is_err() || validate::repo(repo).is_err() {
+        return Err(invalid());
+    }
+    Ok((owner.to_owned(), repo.to_owned()))
+}
+
+const MAX_REVIEWERS: usize = 10;
+
+/// Trimmed, de-duplicated reviewer logins (a leading `@` is accepted).
+fn clean_reviewers(state: &AppState, user: &CurrentUser, raw: &[String]) -> Result<Vec<String>, AppError> {
+    let mut out: Vec<String> = Vec::new();
+    for r in raw {
+        let login = r.trim().trim_start_matches('@');
+        if login.is_empty() || out.iter().any(|o| o.eq_ignore_ascii_case(login)) {
+            continue;
+        }
+        if validate::user_login(login).is_err() {
+            return Err(AppError::validation([("reviewers", format!("'{login}' is not a valid GitHub username."))]));
+        }
+        // Without a GitHub App the requester authors the pull request, and GitHub refuses self-review.
+        if !state.github.has_app() && login.eq_ignore_ascii_case(&user.user.login) {
+            return Err(AppError::validation([(
+                "reviewers",
+                "You open the pull request, so GitHub does not let you review it. Remove your own username.",
+            )]));
+        }
+        out.push(login.to_owned());
+    }
+    if out.len() > MAX_REVIEWERS {
+        return Err(AppError::validation([("reviewers", format!("Add at most {MAX_REVIEWERS} reviewers."))]));
+    }
+    Ok(out)
+}
+
+/// `POST /api/bounded-context/jobs/{id}/pull-request` — by the requester, or by an administrator on their behalf
+/// (with the administrator's own push access).
 pub async fn publish(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,
     ApiJson(req): ApiJson<PublishRequest>,
 ) -> ApiResult<Response> {
-    let job = state.store.get_user_job(user.user.id, parse_job_id(&id)?).await?;
+    let job = readable_job(&state, &user, parse_job_id(&id)?).await?;
+    let owner_view = job.user_id == user.user.id;
     if job.status() != JobStatus::Succeeded {
         return Err(AppError::conflict("Only a successfully generated job can be published.").into());
     }
     if matches!(job.publish_status(), PublishStatus::Queued | PublishStatus::Running | PublishStatus::Succeeded) {
-        return Ok((StatusCode::OK, Json(job_json(&state, &job).await?)).into_response());
+        return Ok((StatusCode::OK, Json(job_json_as(&state, &job, owner_view).await?)).into_response());
     }
     let title = req.title.trim();
     if title.is_empty() || title.len() > 256 || title.chars().any(char::is_control) {
@@ -484,6 +646,7 @@ pub async fn publish(
         )])
         .into());
     }
+    let reviewers = clean_reviewers(&state, &user, &req.reviewers)?;
     let token = state.tokens.access_token(user.user.id).await?;
     let repo = state.github.get_repository(&token, &job.owner, &job.repo).await.map_err(|e| e.to_user_error())?;
     if !repo.permissions().push {
@@ -493,33 +656,39 @@ pub async fn publish(
         )
         .into());
     }
-    if req.publish_central {
-        let Some((central_owner, central_repo)) = state.cfg.common.central_repository.as_ref() else {
-            return Err(AppError::conflict("Central repository publishing is not configured.").into());
+    let central = if req.publish_central {
+        let chosen = match req.central_repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => Some(parse_repo_slug(raw)?),
+            None => central_repo_for(&state, &job),
+        };
+        let Some((central_owner, central_repo)) = chosen else {
+            return Err(
+                AppError::validation([("central_repo", "Enter the central repository as owner/repository.")]).into()
+            );
         };
         if central_owner.eq_ignore_ascii_case(&job.owner) && central_repo.eq_ignore_ascii_case(&job.repo) {
             return Err(AppError::conflict("The central repository cannot also be the source repository.").into());
         }
-        let central = state
-            .github
-            .get_repository(&token, central_owner, central_repo)
-            .await
-            .map_err(|e| e.to_user_error())?;
+        let central =
+            state.github.get_repository(&token, &central_owner, &central_repo).await.map_err(|e| e.to_user_error())?;
         if !central.permissions().push {
             return Err(AppError::new(
                 ErrorCode::RepositoryAccessDenied,
-                "You need write access to the central repository to open its pull request.",
+                format!("You need write access to {central_owner}/{central_repo} to open its pull request."),
             )
             .into());
         }
         if state.github.has_app() {
             state
                 .github
-                .get_repository_installation(central_owner, central_repo)
+                .get_repository_installation(&central_owner, &central_repo)
                 .await
                 .map_err(|e| e.to_user_error())?;
         }
-    }
+        Some(format!("{central_owner}/{central_repo}"))
+    } else {
+        None
+    };
     if !state.store.list_artifacts(job.id).await?.iter().any(|a| a.allowed) {
         return Err(AppError::conflict("This job produced nothing that can be published.").into());
     }
@@ -530,23 +699,21 @@ pub async fn publish(
             job.id,
             DEFAULT_PUBLISH_ATTEMPTS,
             &json!({}),
-            title,
-            req.publish_central,
+            &PublishOptions { title, central_repo: central.as_deref(), reviewers: &reviewers, as_admin: !owner_view },
         )
         .await?
     {
         PublishOutcome::Queued(job) => {
-            audit(
-                &state,
-                &user,
-                actions::PUBLISH_REQUESTED,
-                &job,
-                json!({ "title": title, "publish_central": req.publish_central }),
-            )
-            .await;
-            Ok((StatusCode::ACCEPTED, Json(job_json(&state, &job).await?)).into_response())
+            let mut details = json!({ "title": title, "publish_central": req.publish_central, "reviewers": reviewers });
+            if !owner_view {
+                details["on_behalf_of"] = json!(job.requested_by);
+            }
+            audit(&state, &user, actions::PUBLISH_REQUESTED, &job, details).await;
+            Ok((StatusCode::ACCEPTED, Json(job_json_as(&state, &job, owner_view).await?)).into_response())
         }
-        PublishOutcome::Unchanged(job) => Ok((StatusCode::OK, Json(job_json(&state, &job).await?)).into_response()),
+        PublishOutcome::Unchanged(job) => {
+            Ok((StatusCode::OK, Json(job_json_as(&state, &job, owner_view).await?)).into_response())
+        }
     }
 }
 
@@ -567,7 +734,7 @@ pub async fn retry(State(state): State<AppState>, user: CurrentUser, Path(id): P
         return Err(AppError::conflict("Only failed or cancelled jobs can be retried.").into());
     }
     let generator_id = if old.generator_source == "builtin" {
-        BUILTIN_ID.to_owned()
+        old.generator_id.clone().unwrap_or_else(|| BUILTIN_ID.to_owned())
     } else {
         old.generator_id
             .clone()

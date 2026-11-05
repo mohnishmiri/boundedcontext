@@ -48,7 +48,8 @@ ${INGRESS_INVENTORY_TABLE}
 
 ### Step 3 — Generate exactly these artifacts
 
-Write the following files under `${OUTPUT_DIR}` (create the directory if absent), using the
+Write the following files under `${OUTPUT_DIR}` (writing a file creates its folders; never add `.keep`/`.gitkeep`
+placeholders), using the
 exact file names and per-file required content from the pack specification in
 `orchestrate.agent.md`:
 

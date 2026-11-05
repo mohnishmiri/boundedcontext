@@ -11,7 +11,7 @@ AKS=aks-bcp-$ENV
 ACR=bcpacr                       # shared across environments
 KV=kv-bcp-$ENV
 PG=pg-bcp-$ENV
-NS=bcp
+NS=bounded-context
 HOST=bcp.example.com             # public host name of the portal
 ```
 

@@ -1,4 +1,4 @@
-export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost';
+export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost' | 'inverse';
 
 const base =
   'inline-flex items-center justify-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium transition-colors ' +
@@ -12,6 +12,8 @@ const variants: Record<ButtonVariant, string> = {
     'dark:bg-gray-800 dark:text-gray-100 dark:ring-gray-600 dark:hover:bg-gray-700',
   danger: 'bg-red-600 text-white shadow-sm hover:bg-red-500 disabled:hover:bg-red-600',
   ghost: 'text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800',
+  /** On the dark brand-blue header. */
+  inverse: 'text-white/90 hover:bg-white/10 hover:text-white focus-visible:outline-white',
 };
 
 /** Classes for buttons and button-styled links. */

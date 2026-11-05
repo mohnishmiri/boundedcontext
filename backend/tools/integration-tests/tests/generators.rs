@@ -17,10 +17,14 @@ async fn lists_builtin_and_curated_generators() {
     let cookie = h.login("octocat").await;
     let r = h.get("/api/generators", &cookie).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
-    assert_eq!(ids(&r.body["items"]), ["builtin", "lite", "ctx"]);
+    assert_eq!(ids(&r.body["items"]), ["builtin", "omni", "lite", "ctx"]);
     assert_eq!(r.body["default_id"], "builtin");
     assert_eq!(r.body["can_add"], true);
-    let lite = &r.body["items"][1];
+    let omni = &r.body["items"][1];
+    assert_eq!(omni["source"], "builtin");
+    assert_eq!(omni["name"], "OMNI README.md + AGENTS.md");
+    assert!(omni["repository"].is_null());
+    let lite = &r.body["items"][2];
     assert_eq!(lite["source"], "curated");
     assert_eq!(lite["removable"], false);
     assert_eq!(lite["repository"]["owner"], "genhub");
@@ -35,6 +39,9 @@ async fn lists_builtin_and_curated_generators() {
     assert_eq!(ctx.body["resolved"]["sha"], head);
     let builtin = h.get("/api/generators/builtin/agent", &cookie).await;
     assert_eq!(builtin.body["id"], "bounded-context");
+    let omni = h.get("/api/generators/omni/agent", &cookie).await;
+    assert_eq!(omni.status, StatusCode::OK, "{}", omni.text);
+    assert_eq!(omni.body["id"], "omni-readme");
     assert_eq!(h.get("/api/agent", &cookie).await.body["id"], "bounded-context");
     assert_eq!(h.get("/api/generators/nope/agent", &cookie).await.status, StatusCode::NOT_FOUND);
 }

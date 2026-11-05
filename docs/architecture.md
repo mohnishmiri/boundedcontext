@@ -96,7 +96,7 @@ bundle (`bundle.yaml` + agent files) — and a request can cover **several repos
 
 | Source | Where the bundle comes from | Who can use it |
 |---|---|---|
-| `builtin` | Baked into the worker image (`agent-bundle/`), unrestricted as before | everyone |
+| `builtin` | Baked into the images: the default bundle (`agent-bundle/`) plus the registry's `bundled` entries (`generators/<dir>/`), unrestricted | everyone |
 | `curated` | A repository listed in `config/generators.yaml` | everyone |
 | `user` | A repository the user added (`POST /api/generators`), saved per user | the user; the repository must match the operator `allow` patterns |
 

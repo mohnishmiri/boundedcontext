@@ -2,7 +2,7 @@ import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query';
 
 import * as api from './client';
 import { isTerminalStatus } from '../lib/jobState';
-import type { JobStatus } from './types';
+import type { JobScope, JobStatus } from './types';
 
 export const queryKeys = {
   me: ['auth', 'me'] as const,
@@ -18,7 +18,17 @@ export const queryKeys = {
   branches: (owner: string, repo: string, q: string, page: number) =>
     ['github', 'branches', owner, repo, q, page] as const,
   jobs: ['jobs'] as const,
-  jobList: (status: JobStatus | undefined, page: number) => ['jobs', 'list', status ?? 'all', page] as const,
+  jobList: (filter: JobListFilter) =>
+    [
+      'jobs',
+      'list',
+      filter.scope,
+      filter.status ?? 'all',
+      filter.requestedBy ?? '',
+      filter.search ?? '',
+      filter.page,
+      filter.perPage ?? JOBS_PER_PAGE,
+    ] as const,
   batchJobs: (batchId: string) => ['jobs', 'batch', batchId] as const,
   job: (id: string) => ['jobs', 'detail', id] as const,
   jobDiff: (id: string) => ['jobs', 'diff', id] as const,
@@ -120,11 +130,34 @@ export function useBranches(owner: string | null, repo: string | null, q: string
 }
 
 export const JOBS_PER_PAGE = 20;
+export const JOBS_PER_PAGE_OPTIONS = [10, 20, 50, 100];
 
-export function useJobList(status: JobStatus | undefined, page: number) {
+export type JobListFilter = {
+  scope: JobScope;
+  status: JobStatus | undefined;
+  /** Requester login (administrators, `scope: 'all'`). */
+  requestedBy?: string;
+  /** Free text matched against repository, branch, requester and job id. */
+  search?: string;
+  page: number;
+  perPage?: number;
+};
+
+export function useJobList(filter: JobListFilter) {
   return useQuery({
-    queryKey: queryKeys.jobList(status, page),
-    queryFn: ({ signal }) => api.listJobs({ status, page, per_page: JOBS_PER_PAGE }, signal),
+    queryKey: queryKeys.jobList(filter),
+    queryFn: ({ signal }) =>
+      api.listJobs(
+        {
+          status: filter.status,
+          scope: filter.scope,
+          requested_by: filter.scope === 'all' ? filter.requestedBy || undefined : undefined,
+          q: filter.search || undefined,
+          page: filter.page,
+          per_page: filter.perPage ?? JOBS_PER_PAGE,
+        },
+        signal,
+      ),
     placeholderData: keepPreviousData,
     refetchInterval: (query) => {
       const items = query.state.data?.items ?? [];
@@ -145,14 +178,18 @@ export function useJobDiff(id: string, enabled: boolean) {
   });
 }
 
-export const BATCH_JOBS_PER_PAGE = 100;
 export const BATCH_POLL_MS = 3_000;
+/** Upper bound on jobs loaded for one batch view. */
+export const BATCH_MAX_JOBS = 1_000;
 
-/** The jobs of one batch, polled until every job has reached a terminal status. */
+/** The jobs of one batch (every page), polled until every job has reached a terminal status. */
 export function useBatchJobs(batchId: string) {
   return useQuery({
     queryKey: queryKeys.batchJobs(batchId),
-    queryFn: ({ signal }) => api.listJobs({ batch_id: batchId, per_page: BATCH_JOBS_PER_PAGE }, signal),
+    queryFn: async ({ signal }) => {
+      const { items, truncated } = await api.listAllJobs({ batch_id: batchId }, BATCH_MAX_JOBS, signal);
+      return { items, has_more: truncated };
+    },
     refetchInterval: (query) => {
       const items = query.state.data?.items;
       if (!items) return false;

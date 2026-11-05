@@ -13,7 +13,9 @@ RUN --mount=type=secret,id=corporate_ca,required=false \
      fi \
  && npm ci --no-audit --no-fund
 COPY . .
-RUN npm run build
+# Shown in the footer; scripts/push-images.sh passes the image tag.
+ARG APP_VERSION
+RUN APP_VERSION="$APP_VERSION" npm run build
 
 # ---- runtime ----
 FROM nginxinc/nginx-unprivileged:1.27-alpine

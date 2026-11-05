@@ -60,7 +60,7 @@ spec:
             - configMapRef:
                 name: {{ include "bcp.fullname" . }}-api
           env:
-            {{- include "bcp.secretFileEnv" (dict "ctx" $ "all" true) | nindent 12 }}
+            {{- include "bcp.secretFileEnv" (dict "ctx" $ "all" true "component" "api") | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080

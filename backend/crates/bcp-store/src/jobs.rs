@@ -7,6 +7,16 @@ use uuid::Uuid;
 
 use crate::{Result, Store, StoreError};
 
+/// Shared job-list filter: $1 user (NULL = all users), $3 owner, $4 repo, $5 batch, $6 requester login,
+/// $7 lower-case search text.
+const LIST_WHERE: &str = "($1::uuid IS NULL OR j.user_id = $1)
+    AND ($3::text IS NULL OR lower(j.owner) = lower($3))
+    AND ($4::text IS NULL OR lower(j.repo) = lower($4))
+    AND ($5::uuid IS NULL OR j.batch_id = $5)
+    AND ($6::text IS NULL OR lower(u.login) = lower($6))
+    AND ($7::text IS NULL OR strpos(lower(j.owner || '/' || j.repo || ' ' || j.base_branch || ' ' || u.login
+        || ' ' || j.id::text), $7) > 0)";
+
 /// Columns selected for every job read, joined with the requester's login.
 const JOB_COLUMNS: &str = r#"
     j.id, j.user_id, u.login AS requested_by, j.owner, j.repo, j.repo_id, j.installation_id, j.base_branch,
@@ -15,7 +25,7 @@ const JOB_COLUMNS: &str = r#"
     j.cancel_requested, j.output_primary, j.publish_status, j.publish_stage, j.publish_stage_times,
     j.publish_requested_by, j.publish_title, j.publish_central, j.publish_branch, j.publish_commit_sha,
     j.publish_pr_number, j.publish_pr_url, j.central_publish_branch, j.central_publish_commit_sha,
-    j.central_publish_pr_number, j.central_publish_pr_url,
+    j.central_publish_pr_number, j.central_publish_pr_url, j.central_publish_repo, j.publish_reviewers,
     j.publish_error_code, j.publish_error_message, j.publish_error_retryable, j.publish_updated_at,
     j.created_at, j.started_at, j.finished_at, j.updated_at, j.batch_id, j.generator_source, j.generator_id,
     j.generator_name, j.generator_owner, j.generator_repo, j.generator_branch, j.generator_path, j.generator_sha,
@@ -63,6 +73,10 @@ pub struct JobRow {
     pub central_publish_commit_sha: Option<String>,
     pub central_publish_pr_number: Option<i32>,
     pub central_publish_pr_url: Option<String>,
+    /// `owner/repo` of the central pull request (`None` for jobs published before it was recorded).
+    pub central_publish_repo: Option<String>,
+    /// JSON array of GitHub logins asked to review the pull request(s).
+    pub publish_reviewers: Value,
     pub publish_error_code: Option<String>,
     pub publish_error_message: Option<String>,
     pub publish_error_retryable: Option<bool>,
@@ -116,12 +130,31 @@ impl JobGenerator {
             key: "builtin".into(),
         }
     }
+
+    /// A bundled generator: baked into the images like the built-in one; `path` is its directory there.
+    pub fn bundled(id: &str, name: impl Into<String>, dir: &str) -> Self {
+        Self {
+            source: "builtin".into(),
+            id: Some(id.into()),
+            name: name.into(),
+            owner: None,
+            repo: None,
+            branch: None,
+            path: Some(dir.into()),
+            sha: None,
+            key: format!("builtin:{id}"),
+        }
+    }
 }
 
 impl JobRow {
     /// Output allowlist recorded when the job was created (empty for jobs created before it was recorded).
     pub fn output_globs(&self) -> Vec<String> {
         serde_json::from_value(self.output_paths.clone()).unwrap_or_default()
+    }
+
+    pub fn reviewers(&self) -> Vec<String> {
+        serde_json::from_value(self.publish_reviewers.clone()).unwrap_or_default()
     }
 
     pub fn status(&self) -> JobStatus {
@@ -143,6 +176,17 @@ impl JobRow {
     pub fn is_settled(&self) -> bool {
         self.status().is_terminal() && !self.publish_status().is_active()
     }
+}
+
+/// What the user chose when requesting the pull request(s).
+#[derive(Debug, Clone, Copy)]
+pub struct PublishOptions<'a> {
+    pub title: &'a str,
+    /// `owner/repo` of the central repository, when its pull request was requested.
+    pub central_repo: Option<&'a str>,
+    pub reviewers: &'a [String],
+    /// An administrator publishes on behalf of the job's requester (the job need not be theirs).
+    pub as_admin: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +216,10 @@ pub struct JobFilter {
     pub owner: Option<String>,
     pub repo: Option<String>,
     pub batch_id: Option<Uuid>,
+    /// Login of the requester (administrator views across users).
+    pub requested_by: Option<String>,
+    /// Case-insensitive substring of repository, branch, requester login or job id.
+    pub search: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -335,21 +383,20 @@ impl Store {
         self.get_job(id).await?.ok_or(StoreError::NotFound)
     }
 
+    /// Jobs of `user_id`, or of every user when `None` (administrators), newest first.
     pub async fn list_jobs(
         &self,
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         filter: &JobFilter,
         page: u32,
         per_page: u32,
     ) -> Result<(Vec<JobRow>, i64)> {
         let offset = i64::from(page.saturating_sub(1)) * i64::from(per_page);
-        let where_sql = "j.user_id = $1 AND ($2::text IS NULL OR j.status = $2)
-                         AND ($3::text IS NULL OR lower(j.owner) = lower($3))
-                         AND ($4::text IS NULL OR lower(j.repo) = lower($4))
-                         AND ($5::uuid IS NULL OR j.batch_id = $5)";
+        let search = filter.search.as_deref().map(str::to_lowercase);
         let sql = format!(
-            "SELECT {JOB_COLUMNS} FROM jobs j JOIN users u ON u.id = j.user_id WHERE {where_sql}
-             ORDER BY j.created_at DESC, j.id LIMIT $6 OFFSET $7"
+            "SELECT {JOB_COLUMNS} FROM jobs j JOIN users u ON u.id = j.user_id WHERE {LIST_WHERE}
+               AND ($2::text IS NULL OR j.status = $2)
+             ORDER BY j.created_at DESC, j.id LIMIT $8 OFFSET $9"
         );
         let status = filter.status.map(|s| s.as_str());
         let rows = sqlx::query_as::<_, JobRow>(&sql)
@@ -358,19 +405,44 @@ impl Store {
             .bind(filter.owner.as_deref())
             .bind(filter.repo.as_deref())
             .bind(filter.batch_id)
+            .bind(filter.requested_by.as_deref())
+            .bind(search.as_deref())
             .bind(i64::from(per_page))
             .bind(offset)
             .fetch_all(&self.pool)
             .await?;
-        let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM jobs j WHERE {where_sql}"))
+        let total: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM jobs j JOIN users u ON u.id = j.user_id WHERE {LIST_WHERE}
+               AND ($2::text IS NULL OR j.status = $2)"
+        ))
+        .bind(user_id)
+        .bind(status)
+        .bind(filter.owner.as_deref())
+        .bind(filter.repo.as_deref())
+        .bind(filter.batch_id)
+        .bind(filter.requested_by.as_deref())
+        .bind(search.as_deref())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((rows, total))
+    }
+
+    /// Number of jobs per status for the same scope and filter as [`Store::list_jobs`], ignoring `filter.status`.
+    pub async fn count_jobs_by_status(&self, user_id: Option<Uuid>, filter: &JobFilter) -> Result<Vec<(String, i64)>> {
+        let sql = format!(
+            "SELECT j.status, count(*) FROM jobs j JOIN users u ON u.id = j.user_id
+              WHERE {LIST_WHERE} AND $2::text IS NULL GROUP BY j.status"
+        );
+        Ok(sqlx::query_as::<_, (String, i64)>(&sql)
             .bind(user_id)
-            .bind(status)
+            .bind(None::<&str>)
             .bind(filter.owner.as_deref())
             .bind(filter.repo.as_deref())
             .bind(filter.batch_id)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok((rows, total))
+            .bind(filter.requested_by.as_deref())
+            .bind(filter.search.as_deref().map(str::to_lowercase))
+            .fetch_all(&self.pool)
+            .await?)
     }
 
     /// Deletes settled jobs (with their artifacts, logs and tasks) created before `cutoff`. Audit events are
@@ -619,8 +691,7 @@ impl Store {
         job_id: Uuid,
         max_attempts: i32,
         stage_times: &Value,
-        title: &str,
-        publish_central: bool,
+        options: &PublishOptions<'_>,
     ) -> Result<PublishOutcome> {
         let mut tx = self.pool.begin().await?;
         let row: Option<(Uuid, String, String)> =
@@ -629,7 +700,7 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
         let Some((owner_id, status, publish_status)) = row else { return Err(StoreError::NotFound) };
-        if owner_id != user_id {
+        if owner_id != user_id && !options.as_admin {
             return Err(StoreError::NotFound);
         }
         if JobStatus::parse(&status) != Some(JobStatus::Succeeded) {
@@ -642,17 +713,19 @@ impl Store {
             return Ok(PublishOutcome::Unchanged(job));
         }
         sqlx::query(
-                "UPDATE jobs SET publish_status = 'queued', publish_stage = 'queued', publish_stage_times = $3,
+            "UPDATE jobs SET publish_status = 'queued', publish_stage = 'queued', publish_stage_times = $3,
                     publish_requested_by = $2, publish_error_code = NULL, publish_error_message = NULL,
                     publish_error_retryable = NULL, publish_title = $4, publish_central = $5,
-                    publish_updated_at = now(), updated_at = now()
+                    central_publish_repo = $6, publish_reviewers = $7, publish_updated_at = now(), updated_at = now()
               WHERE id = $1",
         )
         .bind(job_id)
         .bind(user_id)
         .bind(stage_times)
-        .bind(title)
-        .bind(publish_central)
+        .bind(options.title)
+        .bind(options.central_repo.is_some())
+        .bind(options.central_repo)
+        .bind(serde_json::json!(options.reviewers))
         .execute(&mut *tx)
         .await?;
         sqlx::query("INSERT INTO job_tasks (id, job_id, kind, max_attempts) VALUES ($1, $2, 'publish', $3)")
@@ -683,7 +756,7 @@ impl Store {
     /// Persists whichever publish results are set; `None` fields are left unchanged.
     pub async fn save_publish_progress(&self, job_id: Uuid, p: &PublishProgress) -> Result<()> {
         sqlx::query(
-                "UPDATE jobs SET publish_title = coalesce($2, publish_title),
+            "UPDATE jobs SET publish_title = coalesce($2, publish_title),
                     publish_branch = coalesce($3, publish_branch),
                     publish_commit_sha = coalesce($4, publish_commit_sha),
                     publish_pr_number = coalesce($5, publish_pr_number),

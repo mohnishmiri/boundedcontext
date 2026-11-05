@@ -132,16 +132,11 @@ impl UsageSummary {
     /// One log line for the job log.
     pub fn describe(&self) -> String {
         let models: Vec<String> =
-            self.models.iter().map(|m| format!("{} ({} requests)", m.model, m.requests)).collect();
+            self.models.iter().map(|m| format!("{} ({:.2} AI credits)", m.model, m.ai_credits)).collect();
         format!(
-            "Copilot usage: {:.2} AI credits (est.), {} premium request(s); {} input tokens ({} cache read, {} cache write), {} output tokens, {} reasoning tokens; models: {}",
+            "Copilot usage: {:.2} AI credits (est.), {} premium request(s); models: {}",
             self.ai_credits,
             self.premium_requests,
-            self.tokens.input_tokens,
-            self.tokens.cache_read_tokens,
-            self.tokens.cache_write_tokens,
-            self.tokens.output_tokens,
-            self.tokens.reasoning_tokens,
             if models.is_empty() { "none".to_owned() } else { models.join(", ") },
         )
     }

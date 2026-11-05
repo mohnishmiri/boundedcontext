@@ -1,0 +1,13 @@
+# Perf cluster identifiers (not secrets). Fill in, then pass after values-perf.yaml:
+#   helm upgrade --install bcp . -n bounded-context -f values-perf.yaml -f values-perf.local.yaml ...
+
+secrets:
+  keyVault:
+    name: "attcc-eastus2-perf-kv"                    # Perf Key Vault holding database-url and token-encryption-key
+
+ingress:
+  tls:
+    # Exactly one of: Key Vault certificate name (synced by akv2k8s), certificate id (app routing add-on), or a TLS secret.
+    akv2k8sCertName: "ragaflow-boundedcontext"         # synced into secret bcp-tls
+    keyVaultCertUri: ""         # e.g. https://<kv>.vault.azure.net/certificates/ragaflow-boundedcontext
+    secretName: ""              # e.g. ragaflow-tls

@@ -1,7 +1,8 @@
 # Generator registry — operator maintained. Served by GET /api/generators and enforced server-side.
 #
 # A generator is an agent bundle (bundle.yaml + agents/, see agent-bundle/README.md) that produces the
-# documentation. The built-in generator is the bundle baked into the worker image (agent-bundle/). Everything
+# documentation. The built-in generator is the bundle baked into the images (agent-bundle/), and `bundled`
+# entries below are baked in from generators/. Everything
 # else is fetched from a GitHub repository at job time, pinned to the commit that was current when the job was
 # created, using the requesting user's token (so the user — and, in GitHub App mode, the portal's App — must be
 # able to read that repository).
@@ -10,9 +11,31 @@
 # asks for: no shell/url/memory tools, no MCP servers, no repository instructions, and only documentation files
 # (md, mdx, txt, yaml, yml, json) outside dot-directories can be written to the pull request.
 
-# builtin:                     # optional display overrides for the built-in generator
-#   name: Standard generator
-#   description: Bounded-context documentation using the portal's bundled agent.
+# `central_repo` (builtin, bundled and curated entries): owner/repository offered for the optional second pull
+# request; entries without it use BCP_CENTRAL_REPO.
+
+# Built-in generator (AIFC Archetype & Bounded Context Orchestrator, agent-bundle/). name/description optional.
+builtin:
+  central_repo: ATT-DP1/apm0014313-ragaflow-ai-context-docs
+
+# Bundled generators: further bundles baked into the api and worker images from generators/ (BCP_GENERATORS_DIR,
+# /opt/generators in the images). Trusted and listed like the built-in one; `dir` holds bundle.yaml and is
+# relative to BCP_GENERATORS_DIR. `name`/`description` default to the bundle's own.
+bundled:
+  # Vendored OMNI omni-document --mode readme (snapshot of ATT-DP1/apm0011159-omni-global-rules, see OMNI_SOURCE_SHA).
+  - id: omni-readme
+    name: OMNI README.md + AGENTS.md
+    description: Runs OMNI omni-document --mode readme to write README.md and AGENTS.md with the OMNI template.
+    dir: omni-readme
+    central_repo: ATT-DP1/apm0014313-ATTCC-AIFC-knowledge-base
+  # Infrastructure & platform code: Helm/Kubernetes, Terraform/IaC, CI/CD pipelines, Dockerfiles, SQL/DB files.
+  - id: infra-context
+    name: Infrastructure & Platform Context (Helm / Terraform / DevOps / SQL)
+    description: >-
+      Documents Helm charts, Kubernetes manifests, Terraform/IaC, CI/CD pipelines and SQL/database files of a
+      repository: docs/INFRA-CONTEXT-<repo>.md plus a machine-readable inventory.
+    dir: infra-context
+    central_repo: ATT-DP1/apm0014313-ragaflow-ai-context-docs
 
 # Curated generators: always listed for every user. `path` is the directory holding bundle.yaml. Example:
 #
@@ -23,19 +46,13 @@
 #     owner: mohnishmiri
 #     repo: bounded-context-generator
 #     path: aifc-archetype-generator      # must contain bundle.yaml (agents_dir: "." if the agent files sit beside it)
-curated:
-  # Vendored OMNI omni-document --mode readme (snapshot of ATT-DP1/apm0011159-omni-global-rules); lives in this repo.
-  - id: omni-readme
-    name: OMNI README.md + AGENTS.md
-    description: Runs OMNI omni-document --mode readme to write README.md and AGENTS.md with the OMNI template.
-    owner: mohnishmiri
-    repo: boundedcontext
-    path: generators/omni-readme
+curated: []
 
 # Repositories users may add as their own generators (owner/repo, or owner/* for every repository of an
 # owner; case-insensitive). Leave empty to disable user-added generators.
 allow:
-  - mohnishmiri/*
+  - ATT-DP1/*
+  - ATT-DP5/*
 
 # Most generator repositories one user can save.
 max_user_generators: 20

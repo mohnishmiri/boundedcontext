@@ -15,13 +15,13 @@ export function formatTime(iso: string | null | undefined): string {
 
 export function formatDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || ms < 0) return '—';
-  const totalSeconds = Math.round(ms / 1000);
+  const totalSeconds = Math.floor(ms / 1000);
   if (totalSeconds < 60) return `${totalSeconds}s`;
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  const seconds = (totalSeconds % 60).toString().padStart(2, '0');
+  if (hours > 0) return `${hours}h ${minutes.toString().padStart(2, '0')}m ${seconds}s`;
+  return `${minutes}m ${seconds}s`;
 }
 
 export function formatBytes(bytes: number): string {

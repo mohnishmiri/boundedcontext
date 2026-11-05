@@ -5,7 +5,7 @@ URL: https://{{ .Values.ingress.host }}
 {{- end }}
 
 Worker mode: {{ .Values.worker.mode }}{{ if .Values.keda.enabled }} (KEDA {{ if eq .Values.worker.mode "loop" }}ScaledObject{{ else }}ScaledJob{{ end }}){{ end }}
-Secrets: {{ .Values.secrets.mode }}{{ if eq .Values.secrets.mode "csi" }} (Key Vault "{{ .Values.secrets.keyVault.name }}"){{ end }}
+Secrets: {{ .Values.secrets.mode }}{{ if ne .Values.secrets.mode "existingSecret" }} (Key Vault "{{ .Values.secrets.keyVault.name }}"){{ end }}
 
 Check:
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}

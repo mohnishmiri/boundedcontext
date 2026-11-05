@@ -15,8 +15,8 @@ const NONCE_LEN: usize = 12;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
-    #[error("encryption key must be 32 bytes encoded as base64")]
-    BadKey,
+    #[error("encryption key must be 32 bytes encoded as base64 ({0}); generate one with `openssl rand -base64 32`")]
+    BadKey(String),
     #[error("ciphertext is malformed or was produced with a different key")]
     Decrypt,
 }
@@ -34,11 +34,18 @@ impl std::fmt::Debug for TokenCipher {
 
 impl TokenCipher {
     pub fn from_base64(key_b64: &str) -> Result<Self, CryptoError> {
-        let key = STANDARD.decode(key_b64.trim()).map_err(|_| CryptoError::BadKey)?;
+        let text = key_b64.trim();
+        let key = STANDARD.decode(text).map_err(|_| {
+            CryptoError::BadKey(format!("the {}-character value is not valid standard base64", text.len()))
+        })?;
         if key.len() != 32 {
-            return Err(CryptoError::BadKey);
+            let hint = match STANDARD.decode(key.trim_ascii()) {
+                Ok(inner) if inner.len() == 32 => "; it looks base64-encoded twice, store the inner value",
+                _ => "",
+            };
+            return Err(CryptoError::BadKey(format!("it decodes to {} bytes{hint}", key.len())));
         }
-        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| CryptoError::BadKey)?;
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| CryptoError::BadKey("invalid length".into()))?;
         Ok(Self { cipher })
     }
 

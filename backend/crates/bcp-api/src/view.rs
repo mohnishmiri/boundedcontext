@@ -51,6 +51,7 @@ pub fn summary(job: &JobRow) -> Value {
         "publish_status": job.publish_status,
         "pr_url": job.publish_pr_url,
         "created_at": job.created_at,
+        "started_at": job.started_at,
         "finished_at": job.finished_at,
         "requested_by": job.requested_by,
         "batch_id": job.batch_id,
@@ -69,9 +70,13 @@ fn generator_json(job: &JobRow) -> Value {
 }
 
 pub fn can_publish(job: &JobRow, artifacts: &[ArtifactRow]) -> bool {
+    job.can_push && can_publish_as_admin(job, artifacts)
+}
+
+/// Like `can_publish`, without the requester's push access: an administrator publishes with their own.
+pub fn can_publish_as_admin(job: &JobRow, artifacts: &[ArtifactRow]) -> bool {
     job.status() == JobStatus::Succeeded
         && matches!(job.publish_status(), PublishStatus::NotStarted | PublishStatus::Failed)
-        && job.can_push
         && artifacts.iter().any(|a| a.allowed)
 }
 
@@ -140,6 +145,7 @@ pub fn job(job: &JobRow, artifacts: &[ArtifactRow], web_url: &str, central_repo:
         "stage": job.publish_stage().map(PublishStage::as_str),
         "steps": publish_steps,
         "title": job.publish_title,
+        "reviewers": job.reviewers(),
         "central_available": central_repo.is_some(),
         "central_requested": job.publish_central,
         "central_repo": central_repo,

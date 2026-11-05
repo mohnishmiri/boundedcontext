@@ -329,7 +329,7 @@ impl Worker {
                 let title = format!("docs: bounded-context documentation for {repo}");
                 let title = job.publish_title.as_deref().unwrap_or(&title);
                 let body = self.pr_body(job, &base_sha, &requester_login.0, &files);
-                match gh.create_pull(&token, owner, repo, &title, &body, &branch, &job.base_branch).await {
+                match gh.create_pull(&token, owner, repo, title, &body, &branch, &job.base_branch).await {
                     Ok(pr) => {
                         self.audit(
                             job,
@@ -373,6 +373,7 @@ impl Worker {
             )
             .await
             .map_err(|e| Outcome::Failed(e.into()))?;
+        self.request_reviews(job, log, &token, (owner, repo), pr.number).await;
         if job.publish_central {
             self.publish_central(job, ctl, steps, log, &requester_login.0, &files).await?;
         }
@@ -391,12 +392,15 @@ impl Worker {
         requester_login: &str,
         files: &[TreeFile],
     ) -> Result<(), Outcome> {
-        let (owner, repo) = self
-            .cfg
-            .common
-            .central_repository
-            .as_ref()
+        let recorded = job
+            .central_publish_repo
+            .as_deref()
+            .and_then(|v| v.split_once('/'))
+            .map(|(o, r)| (o.to_owned(), r.to_owned()));
+        let (owner, repo) = recorded
+            .or_else(|| self.cfg.common.central_repository.clone())
             .ok_or_else(|| Outcome::Failed(AppError::conflict("Central repository publishing is not configured.")))?;
+        let (owner, repo) = (owner.as_str(), repo.as_str());
         let requester = job.publish_requested_by.unwrap_or(job.user_id);
         let user_token = guard(ctl, self.tokens.access_token(requester)).await?;
         let central_repo = guard(ctl, async {
@@ -431,16 +435,18 @@ impl Worker {
         let base_branch = central_repo.default_branch;
 
         self.publish_stage(job, steps, log, PublishStage::CheckingCentralBase).await?;
-        let base_sha = guard(ctl, async {
-            self.github.get_branch_head(&token, owner, repo, &base_branch).await.map_err(svc)
-        })
-        .await?
-        .ok_or_else(|| {
-            Outcome::Failed(
-                AppError::new(ErrorCode::BaseBranchChanged, "The central repository default branch was not found.")
-                    .retryable(false),
-            )
-        })?;
+        let base_sha =
+            guard(ctl, async { self.github.get_branch_head(&token, owner, repo, &base_branch).await.map_err(svc) })
+                .await?
+                .ok_or_else(|| {
+                    Outcome::Failed(
+                        AppError::new(
+                            ErrorCode::BaseBranchChanged,
+                            "The central repository default branch was not found.",
+                        )
+                        .retryable(false),
+                    )
+                })?;
         let central_files: Vec<TreeFile> = files
             .iter()
             .map(|file| {
@@ -453,19 +459,19 @@ impl Worker {
         let commit_sha = match &job.central_publish_commit_sha {
             Some(sha) => sha.clone(),
             None => {
-                let base_commit = guard(ctl, async {
-                    self.github.get_git_commit(&token, owner, repo, &base_sha).await.map_err(svc)
-                })
-                .await?;
+                let base_commit =
+                    guard(ctl, async { self.github.get_git_commit(&token, owner, repo, &base_sha).await.map_err(svc) })
+                        .await?;
                 let tree = guard(ctl, async {
-                    self.github.create_tree(&token, owner, repo, &base_commit.tree.sha, &central_files).await.map_err(svc)
+                    self.github
+                        .create_tree(&token, owner, repo, &base_commit.tree.sha, &central_files)
+                        .await
+                        .map_err(svc)
                 })
                 .await?;
                 let title = job.publish_title.as_deref().unwrap_or("Bounded context documentation");
-                let message = format!(
-                    "docs: update context for {}\n\n{title}\n\n{JOB_TRAILER}: {}\n",
-                    job.repo, job.id
-                );
+                let message =
+                    format!("docs: update context for {}\n\n{title}\n\n{JOB_TRAILER}: {}\n", job.repo, job.id);
                 let commit = guard(ctl, async {
                     self.github.create_commit(&token, owner, repo, &message, &tree, &[&base_sha]).await.map_err(svc)
                 })
@@ -479,24 +485,25 @@ impl Worker {
                     .map_err(|e| Outcome::Failed(e.into()))?;
                 self.audit(job, actions::COMMIT_CREATED, json!({ "target": "central", "commit_sha": commit.sha }))
                     .await;
-                log.info(&format!("Created central repository commit {}", &commit.sha[..commit.sha.len().min(12)])).await;
+                log.info(&format!("Created central repository commit {}", &commit.sha[..commit.sha.len().min(12)]))
+                    .await;
                 commit.sha
             }
         };
 
         self.publish_stage(job, steps, log, PublishStage::CreatingCentralBranch).await?;
-        let branch = job
-            .central_publish_branch
-            .clone()
-            .unwrap_or_else(|| format!("bounded-context/{}-{}-central", validate::slugify(&job.repo, 40), job.short_id()));
+        let branch = job.central_publish_branch.clone().unwrap_or_else(|| {
+            format!("bounded-context/{}-{}-central", validate::slugify(&job.repo, 40), job.short_id())
+        });
         self.store
-            .save_publish_progress(job.id, &PublishProgress { central_branch: Some(branch.clone()), ..Default::default() })
+            .save_publish_progress(
+                job.id,
+                &PublishProgress { central_branch: Some(branch.clone()), ..Default::default() },
+            )
             .await
             .map_err(|e| Outcome::Failed(e.into()))?;
-        let mut existing = guard(ctl, async {
-            self.github.get_branch_head(&token, owner, repo, &branch).await.map_err(svc)
-        })
-        .await?;
+        let mut existing =
+            guard(ctl, async { self.github.get_branch_head(&token, owner, repo, &branch).await.map_err(svc) }).await?;
         if existing.is_none() {
             match self.github.create_branch(&token, owner, repo, &branch, &commit_sha).await {
                 Ok(()) => {
@@ -519,10 +526,9 @@ impl Worker {
         }
         if let Some(head) = existing {
             if head != commit_sha {
-                let theirs = guard(ctl, async {
-                    self.github.get_git_commit(&token, owner, repo, &head).await.map_err(svc)
-                })
-                .await?;
+                let theirs =
+                    guard(ctl, async { self.github.get_git_commit(&token, owner, repo, &head).await.map_err(svc) })
+                        .await?;
                 if theirs.message.contains(&format!("{JOB_TRAILER}: {}", job.id)) {
                     self.store
                         .save_publish_progress(
@@ -593,7 +599,36 @@ impl Worker {
         )
         .await;
         log.info(&format!("Central repository pull request ready: {}", pr.html_url)).await;
+        self.request_reviews(job, log, &token, (owner, repo), pr.number).await;
         Ok(())
+    }
+
+    /// Requests the reviewers chosen in the portal. Never fails the publish: the pull request already exists.
+    async fn request_reviews(
+        &self,
+        job: &JobRow,
+        log: &JobLogger,
+        token: &str,
+        (owner, repo): (&str, &str),
+        number: i64,
+    ) {
+        let reviewers = job.reviewers();
+        if reviewers.is_empty() {
+            return;
+        }
+        match self.github.request_reviewers(token, owner, repo, number, &reviewers).await {
+            Ok(()) => {
+                log.info(&format!("Requested review from {} on {owner}/{repo}#{number}", reviewers.join(", "))).await
+            }
+            Err(GitHubError::Unprocessable { message }) => {
+                log.warn(&format!(
+                    "GitHub did not add reviewers on {owner}/{repo}#{number} ({message}). Reviewers must be \
+                     collaborators on the repository and cannot be the pull request's author; add them on GitHub."
+                ))
+                .await
+            }
+            Err(e) => log.warn(&format!("Could not request reviewers on {owner}/{repo}#{number}: {e}")).await,
+        }
     }
 
     fn pr_body(&self, job: &JobRow, base_sha: &str, login: &str, files: &[TreeFile]) -> String {
@@ -601,9 +636,14 @@ impl Worker {
         let placeholder =
             if job.agent_placeholder { " — ⚠️ placeholder agent, not the production agent" } else { "" };
         let file_list: String = files.iter().map(|f| format!("- `{}`\n", f.path)).collect();
+        let requested = if login.eq_ignore_ascii_case(&job.requested_by) {
+            format!("requested by {login}")
+        } else {
+            format!("requested by {}, opened by administrator {login} on their behalf", job.requested_by)
+        };
         format!(
             "## Bounded-context documentation\n\n\
-             Generated by the **Bounded Context Portal**, requested by {login}.\n\n\
+             Generated by the **Bounded Context Portal**, {requested}.\n\n\
              | | |\n|---|---|\n\
              | Base branch | `{}` |\n\
              | Analysed commit | `{base_sha}` |\n\

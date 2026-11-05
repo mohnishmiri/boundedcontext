@@ -2,6 +2,8 @@
 //! `config/generators.yaml`:
 //!
 //! * the **built-in** generator is the bundle baked into the worker image (always available);
+//! * **bundled** generators are further bundles baked into the images under `BCP_GENERATORS_DIR`, trusted like
+//!   the built-in one;
 //! * **curated** generators are repositories the operator lists explicitly;
 //! * users may add their own generator repositories, but only ones matching the operator's `allow` patterns.
 //!
@@ -92,8 +94,26 @@ pub struct CuratedGenerator {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// `owner/repo` for the optional central pull request; defaults to `BCP_CENTRAL_REPO`.
+    #[serde(default)]
+    pub central_repo: Option<String>,
     #[serde(flatten)]
     pub repository: GeneratorRepo,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundledGenerator {
+    pub id: String,
+    /// Defaults to the bundle's display name.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Directory under `BCP_GENERATORS_DIR` holding `bundle.yaml`.
+    pub dir: String,
+    #[serde(default)]
+    pub central_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -101,6 +121,7 @@ pub struct CuratedGenerator {
 struct BuiltinOverride {
     name: Option<String>,
     description: Option<String>,
+    central_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -108,6 +129,8 @@ struct BuiltinOverride {
 struct RegistryFile {
     #[serde(default)]
     builtin: BuiltinOverride,
+    #[serde(default)]
+    bundled: Vec<BundledGenerator>,
     #[serde(default)]
     curated: Vec<CuratedGenerator>,
     /// `owner/repo` or `owner/*` (case-insensitive) patterns users may add as generator repositories.
@@ -121,6 +144,8 @@ struct RegistryFile {
 pub struct GeneratorRegistry {
     pub builtin_name: Option<String>,
     pub builtin_description: Option<String>,
+    builtin_central_repo: Option<String>,
+    bundled: Vec<BundledGenerator>,
     curated: Vec<CuratedGenerator>,
     allow: Vec<(String, Option<String>)>,
     pub max_user_generators: usize,
@@ -132,11 +157,22 @@ impl Default for GeneratorRegistry {
         Self {
             builtin_name: None,
             builtin_description: None,
+            builtin_central_repo: None,
+            bundled: Vec::new(),
             curated: Vec::new(),
             allow: Vec::new(),
             max_user_generators: DEFAULT_MAX_USER_GENERATORS,
         }
     }
+}
+
+fn check_central_repo(id: &str, value: Option<&str>) -> Result<()> {
+    let Some(v) = value else { return Ok(()) };
+    let ok = v
+        .split_once('/')
+        .is_some_and(|(o, r)| validate::owner(o).is_ok() && validate::repo(r).is_ok() && !r.contains('/'));
+    ensure!(ok, "generator registry: {id}: central_repo {v:?} must be owner/repository");
+    Ok(())
 }
 
 impl GeneratorRegistry {
@@ -159,6 +195,18 @@ impl GeneratorRegistry {
             serde_yaml::from_str(yaml).context("parsing generator registry")?
         };
         let mut seen = std::collections::HashSet::new();
+        let mut bundled = Vec::new();
+        for mut b in file.bundled {
+            ensure!(CURATED_ID_RE.is_match(&b.id), "generator registry: invalid id {:?}", b.id);
+            ensure!(b.id != BUILTIN_ID, "generator registry: id {BUILTIN_ID:?} is reserved");
+            ensure!(seen.insert(b.id.clone()), "generator registry: duplicate id {}", b.id);
+            b.dir = b.dir.trim_matches('/').to_owned();
+            if validate::relative_path(&b.dir).is_err() {
+                bail!("generator registry: {}: dir {:?} must be a relative path", b.id, b.dir);
+            }
+            check_central_repo(&b.id, b.central_repo.as_deref())?;
+            bundled.push(b);
+        }
         let mut curated = Vec::new();
         for mut c in file.curated {
             ensure!(CURATED_ID_RE.is_match(&c.id), "generator registry: invalid id {:?}", c.id);
@@ -168,8 +216,10 @@ impl GeneratorRegistry {
             if let Err(e) = c.repository.validate() {
                 bail!("generator registry: {}: {}", c.id, e.message);
             }
+            check_central_repo(&c.id, c.central_repo.as_deref())?;
             curated.push(c);
         }
+        check_central_repo(BUILTIN_ID, file.builtin.central_repo.as_deref())?;
         let mut allow = Vec::new();
         for pattern in file.allow {
             let (owner, repo) = pattern.split_once('/').with_context(|| {
@@ -184,10 +234,31 @@ impl GeneratorRegistry {
         Ok(Self {
             builtin_name: file.builtin.name,
             builtin_description: file.builtin.description,
+            builtin_central_repo: file.builtin.central_repo,
+            bundled,
             curated,
             allow,
             max_user_generators: file.max_user_generators.unwrap_or(DEFAULT_MAX_USER_GENERATORS),
         })
+    }
+
+    /// The central repository (`owner/repo`) configured for a job's generator id, if the operator set one.
+    pub fn central_repo_for(&self, generator_id: Option<&str>) -> Option<&str> {
+        match generator_id {
+            None | Some(BUILTIN_ID) => self.builtin_central_repo.as_deref(),
+            Some(id) => match self.bundled_by_id(id) {
+                Some(b) => b.central_repo.as_deref(),
+                None => self.curated_by_id(id).and_then(|c| c.central_repo.as_deref()),
+            },
+        }
+    }
+
+    pub fn bundled(&self) -> &[BundledGenerator] {
+        &self.bundled
+    }
+
+    pub fn bundled_by_id(&self, id: &str) -> Option<&BundledGenerator> {
+        self.bundled.iter().find(|b| b.id == id)
     }
 
     pub fn curated(&self) -> &[CuratedGenerator] {
@@ -230,7 +301,9 @@ mod tests {
     use super::*;
 
     const YAML: &str = r#"
-builtin: { name: Standard generator }
+builtin: { name: Standard generator, central_repo: acme/docs }
+bundled:
+  - { id: omni, dir: /omni-readme/, central_repo: acme/kb }
 curated:
   - { id: aifc, name: AIFC, owner: mohnishmiri, repo: bounded-context-generator, path: aifc-archetype-generator/ }
 allow:
@@ -256,6 +329,11 @@ max_user_generators: 3
         assert_eq!(r.max_user_generators, 3);
         assert_eq!(r.curated()[0].repository.path, "aifc-archetype-generator");
         assert_eq!(r.builtin_name.as_deref(), Some("Standard generator"));
+        assert_eq!(r.bundled_by_id("omni").unwrap().dir, "omni-readme");
+        assert_eq!(r.central_repo_for(None), Some("acme/docs"));
+        assert_eq!(r.central_repo_for(Some("builtin")), Some("acme/docs"));
+        assert_eq!(r.central_repo_for(Some("omni")), Some("acme/kb"));
+        assert_eq!(r.central_repo_for(Some("aifc")), None);
     }
 
     #[test]
@@ -272,6 +350,11 @@ max_user_generators: 3
             "curated: [{ id: Bad_Id, name: X, owner: a, repo: b }]",
             "curated: [{ id: a, name: X, owner: a, repo: b }, { id: a, name: Y, owner: a, repo: c }]",
             "curated: [{ id: a, name: X, owner: a, repo: b, path: ../x }]",
+            "bundled: [{ id: builtin, dir: x }]",
+            "bundled: [{ id: a, dir: ../x }]",
+            "bundled: [{ id: a, dir: x, central_repo: not-a-repo }]",
+            "builtin: { central_repo: a/b/c }",
+            "bundled: [{ id: a, dir: x }]\ncurated: [{ id: a, name: X, owner: a, repo: b }]",
             "allow: [not-a-pattern]",
             "allow: ['bad owner/*']",
             "surprise: true",

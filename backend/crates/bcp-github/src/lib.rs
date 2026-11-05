@@ -57,6 +57,14 @@ fn seg(s: &str) -> String {
 }
 
 const MAX_GET_ATTEMPTS: u32 = 3;
+const TARBALL_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(600);
+const TARBALL_STALL_TIMEOUT: Duration = Duration::from_secs(180);
+const TARBALL_MAX_DURATION: Duration = Duration::from_secs(2 * 3600);
+const NO_RESPONSE: &str = "timeout: no response from GitHub within ";
+
+fn is_no_response(e: &GitHubError) -> bool {
+    matches!(e, GitHubError::Network(m) if m.starts_with(NO_RESPONSE))
+}
 const MAX_INLINE_RETRY_WAIT: u64 = 10;
 
 #[derive(Clone)]
@@ -265,7 +273,7 @@ impl GitHubClient {
                 .append_pair("code_challenge_method", "S256")
                 .append_pair("allow_signup", "false");
             if !self.has_app() && !self.client_id.starts_with("Iv") {
-                qp.append_pair("scope", "repo read:org");
+                qp.append_pair("scope", "repo read:org user:email");
             }
         }
         url
@@ -327,6 +335,13 @@ impl GitHubClient {
 
     pub async fn get_authenticated_user(&self, token: &str) -> Result<GhUser> {
         self.get_json("user", self.api("user"), Auth::Token(token)).await
+    }
+
+    /// Needs the `user:email` scope (classic/OAuth) or the "Email addresses" read permission (fine-grained/App).
+    pub async fn list_user_emails(&self, token: &str) -> Result<Vec<GhEmail>> {
+        let mut url = self.api("user/emails");
+        url.query_pairs_mut().append_pair("per_page", "100");
+        self.get_json("user_emails", url, Auth::Token(token)).await
     }
 
     /// Copilot plan and budget of the token's user (internal endpoint used by Copilot clients).
@@ -450,7 +465,8 @@ impl GitHubClient {
         loop {
             attempt += 1;
             match self.download_once(url.clone(), token, dest, max_bytes).await {
-                Err(e) if e.is_transient() && attempt < MAX_GET_ATTEMPTS => {
+                // A request that produced no response for TARBALL_FIRST_BYTE_TIMEOUT is not retried.
+                Err(e) if e.is_transient() && attempt < MAX_GET_ATTEMPTS && !is_no_response(&e) => {
                     tracing::warn!(attempt, error = %e, "retrying tarball download");
                     tokio::time::sleep(backoff(attempt)).await;
                 }
@@ -461,11 +477,12 @@ impl GitHubClient {
 
     async fn download_once(&self, url: Url, token: &str, dest: &Path, max_bytes: u64) -> Result<u64> {
         let started = Instant::now();
-        let resp = self
-            .request(Method::GET, url, Auth::Token(token))?
-            .timeout(Duration::from_secs(600))
-            .send()
+        // Large repositories (or proxies that scan downloads before forwarding them) can take minutes to send
+        // the first byte and stream slowly afterwards, so time out on silence, not on total duration.
+        let send = self.request(Method::GET, url, Auth::Token(token))?.timeout(TARBALL_MAX_DURATION).send();
+        let resp = tokio::time::timeout(TARBALL_FIRST_BYTE_TIMEOUT, send)
             .await
+            .map_err(|_| GitHubError::Network(format!("{NO_RESPONSE}{}s", TARBALL_FIRST_BYTE_TIMEOUT.as_secs())))?
             .map_err(|e| GitHubError::Network(redact_reqwest(&e)))?;
         let resp = check_status(resp).await?;
         if resp.content_length().is_some_and(|len| len > max_bytes) {
@@ -474,7 +491,15 @@ impl GitHubClient {
         let mut file = tokio::fs::File::create(dest).await.map_err(|e| GitHubError::Io(e.to_string()))?;
         let mut stream = resp.bytes_stream();
         let mut total: u64 = 0;
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let next = tokio::time::timeout(TARBALL_STALL_TIMEOUT, stream.next()).await.map_err(|_| {
+                GitHubError::Network(format!(
+                    "timeout: download stalled for {}s after {:.1} MiB",
+                    TARBALL_STALL_TIMEOUT.as_secs(),
+                    total as f64 / 1_048_576.0
+                ))
+            })?;
+            let Some(chunk) = next else { break };
             let chunk = chunk.map_err(|e| GitHubError::Network(redact_reqwest(&e)))?;
             total += chunk.len() as u64;
             if total > max_bytes {
@@ -628,6 +653,29 @@ impl GitHubClient {
             json!({ "title": title, "body": body, "head": head, "base": base, "maintainer_can_modify": false }),
         )
         .await
+    }
+
+    /// Asks users to review a pull request. GitHub answers 422 for logins that are not collaborators or are the
+    /// pull request's author.
+    pub async fn request_reviewers(
+        &self,
+        token: &str,
+        owner: &str,
+        repo: &str,
+        number: i64,
+        reviewers: &[String],
+    ) -> Result<()> {
+        let url = self.api(&format!("repos/{}/{}/pulls/{number}/requested_reviewers", seg(owner), seg(repo)));
+        let _: serde_json::Value = self
+            .send_json(
+                "pulls_request_reviewers",
+                Method::POST,
+                url,
+                Auth::Token(token),
+                json!({ "reviewers": reviewers }),
+            )
+            .await?;
+        Ok(())
     }
 }
 

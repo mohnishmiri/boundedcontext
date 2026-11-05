@@ -39,6 +39,8 @@ impl From<&UserRow> for UserView {
 pub struct CurrentUser {
     pub user: UserRow,
     pub session_hash: [u8; 32],
+    /// Listed in `BCP_ADMIN_LOGINS`: may read every user's jobs and publish them on the requester's behalf.
+    pub is_admin: bool,
 }
 
 pub fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -62,7 +64,8 @@ impl FromRequestParts<AppState> for CurrentUser {
             .ok_or_else(unauth)?;
         let hash = sha256(raw.as_bytes());
         let session = state.store.session_user(&hash).await?.ok_or_else(unauth)?;
-        Ok(CurrentUser { user: session.user, session_hash: hash })
+        let is_admin = state.cfg.is_admin(&session.user.login);
+        Ok(CurrentUser { user: session.user, session_hash: hash, is_admin })
     }
 }
 
@@ -86,7 +89,13 @@ pub struct LoginQuery {
     token: Option<String>,
 }
 
-fn token_login_page(return_to: &str, error_msg: Option<&str>) -> Response {
+fn html_attr(s: &str) -> String {
+    s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn token_login_page(state: &AppState, return_to: &str, error_msg: Option<&str>) -> Response {
+    let return_to = html_attr(return_to);
+    let web = html_attr(state.github.web_url().as_str().trim_end_matches('/'));
     let err_banner = match error_msg {
         Some(msg) => format!(
             r#"<div style="background:#ffebe9;border:1px solid #ff818266;color:#cf222e;padding:12px 16px;border-radius:6px;margin-bottom:16px;font-size:14px;">{msg}</div>"#
@@ -102,22 +111,51 @@ fn token_login_page(return_to: &str, error_msg: Option<&str>) -> Response {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: #f6f8fa; color: #1f2328; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 16px; box-sizing: border-box; }}
-    .card {{ background: #ffffff; border: 1px solid #d0d7de; border-radius: 8px; max-width: 440px; width: 100%; padding: 28px; box-shadow: 0 4px 12px rgba(31,35,40,0.06); }}
-    h1 {{ font-size: 20px; font-weight: 600; margin: 0 0 8px; }}
+    .card {{ background: #ffffff; border: 1px solid #d0d7de; border-radius: 8px; max-width: 520px; width: 100%; padding: 28px; box-shadow: 0 4px 12px rgba(31,35,40,0.06); }}
+    h1 {{ font-size: 20px; font-weight: 600; margin: 0 0 18px; text-align: center; }}
     p {{ font-size: 14px; color: #59636e; line-height: 1.5; margin: 0 0 18px; }}
     label {{ display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }}
     input[type="password"] {{ width: 100%; padding: 8px 12px; font-size: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid #d0d7de; border-radius: 6px; box-sizing: border-box; margin-bottom: 16px; }}
     input[type="password"]:focus {{ outline: 2px solid #0969da; border-color: #0969da; }}
     button {{ width: 100%; background: #1f883d; color: #ffffff; border: 1px solid rgba(31,35,40,0.15); border-radius: 6px; padding: 9px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }}
     button:hover {{ background: #1a7f37; }}
-    .hint {{ margin-top: 16px; padding-top: 14px; border-top: 1px solid #d8dee4; font-size: 12px; color: #59636e; line-height: 1.5; }}
+    .logo {{ display: block; height: 40px; margin: 0 auto 12px; }}
     code {{ background: #eff1f3; padding: 2px 5px; border-radius: 4px; font-size: 12px; }}
+    a {{ color: #0969da; }}
+    details {{ border: 1px solid #d0d7de; border-radius: 6px; margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: #1f2328; }}
+    summary {{ cursor: pointer; padding: 8px 12px; font-weight: 600; background: #f6f8fa; border-radius: 6px; }}
+    details[open] summary {{ border-bottom: 1px solid #d0d7de; border-radius: 6px 6px 0 0; }}
+    details ol {{ margin: 8px 0; padding: 0 12px 0 32px; }}
+    details li {{ margin-bottom: 6px; }}
+    details .note {{ margin: 0; padding: 0 12px 10px; font-size: 12px; color: #59636e; }}
   </style>
 </head>
 <body>
   <div class="card">
+    <img class="logo" src="/att-logo.svg" alt="AT&amp;T">
     <h1>Sign in with GitHub Token</h1>
-    <p>Enter your GitHub Personal Access Token (<code>ghp_…</code> classic with <code>repo</code> scope, or <code>github_pat_…</code>) to browse your repositories and open pull requests. Generation runs on <em>your</em> Copilot credits: with a classic token you will be asked once for a separate Copilot token (the output of <code>gh auth token</code>; no organisation approval needed).</p>
+    <details>
+      <summary>How to create a classic token (recommended)</summary>
+      <ol>
+        <li>Open <a href="{web}/settings/tokens/new?scopes=repo,read:org,user:email&amp;description=Bounded+Context+Portal" target="_blank" rel="noopener noreferrer">Generate new token (classic)</a>. The scopes below are pre-selected.</li>
+        <li>Pick an expiration allowed by your organisation.</li>
+        <li>Scopes: <code>repo</code> (<strong>required</strong>: read code, push the generated branch, open the pull request), <code>read:org</code> (optional: lists your organisations) and <code>user:email</code> (optional: emails you when your documentation is ready).</li>
+        <li>Click <strong>Generate token</strong> and copy it. GitHub shows it only once.</li>
+        <li><strong>Authorise it for your organisation</strong> (needed if the organisation uses SAML single sign-on): open <a href="{web}/settings/tokens" target="_blank" rel="noopener noreferrer">Personal access tokens (classic)</a>, click <strong>Configure SSO</strong> next to the token, then <strong>Authorize</strong> next to the organisation and finish the SSO sign-in. Without this, organisation repositories will not appear.</li>
+      </ol>
+      <p class="note">After signing in you will be asked once for a separate Copilot token, because Copilot does not accept classic tokens.</p>
+    </details>
+    <details>
+      <summary>How to create the Copilot token (fine-grained, after sign-in)</summary>
+      <ol>
+        <li>Open <a href="{web}/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer">Generate new token (fine-grained)</a>.</li>
+        <li><strong>Resource owner</strong>: your <strong>personal account</strong> (not the organisation, so no approval is needed).</li>
+        <li><strong>Repository access</strong>: leave as <em>Public repositories</em>; no repository permissions are needed.</li>
+        <li><strong>Account permissions</strong>: add <em>Copilot Requests</em> only. Add nothing else.</li>
+        <li>Click <strong>Generate token</strong>, copy it, and paste it into the <strong>Copilot token</strong> panel after signing in.</li>
+      </ol>
+      <p class="note">This token only lets the portal run Copilot on your credits; it cannot read or change any repository.</p>
+    </details>
     {err_banner}
     <form method="GET" action="/api/auth/github">
       <input type="hidden" name="return_to" value="{return_to}">
@@ -125,9 +163,6 @@ fn token_login_page(return_to: &str, error_msg: Option<&str>) -> Response {
       <input id="gh-token" name="token" type="password" placeholder="ghp_… or github_pat_…" required autofocus autocomplete="off">
       <button type="submit">Sign in with GitHub</button>
     </form>
-    <div class="hint">
-      <strong>Tip:</strong> You can also set <code>BCP_GITHUB_PAT=ghp_…</code> in your <code>.env</code> file to sign in automatically without this prompt.
-    </div>
   </div>
 </body>
 </html>"#
@@ -141,10 +176,17 @@ async fn sign_in_with_pat(state: &AppState, access_token: String, return_to: &st
         Ok(u) => u,
         Err(e) => {
             tracing::warn!(error = %e, "GitHub token sign-in failed");
-            return token_login_page(
-                return_to,
-                Some("GitHub rejected that token. Check that your token is valid and has 'repo' access."),
-            );
+            let message = match &e {
+                bcp_github::GitHubError::Forbidden { message } if message.contains("IP allow list") => {
+                    "GitHub blocked this request: your enterprise's IP allow list does not include this portal's \
+                     server address. Ask the portal administrators to get it added."
+                }
+                bcp_github::GitHubError::Network(_) | bcp_github::GitHubError::Server { .. } => {
+                    "GitHub could not be reached from the portal. Try again shortly."
+                }
+                _ => "GitHub rejected that token. Check that your token is valid and has 'repo' access.",
+            };
+            return token_login_page(state, return_to, Some(message));
         }
     };
     let tokens = bcp_github::TokenResponse {
@@ -205,7 +247,7 @@ pub async fn login(State(state): State<AppState>, ApiQuery(q): ApiQuery<LoginQue
     let cid = state.cfg.common.github.client_id.as_str();
     let is_real_github = state.github.web_url().host_str() == Some("github.com");
     if is_real_github && (cid.is_empty() || cid == "Iv1.localdev") {
-        return token_login_page(&return_to, None);
+        return token_login_page(&state, &return_to, None);
     }
     let st = OAuthState {
         state: random_token(24),
@@ -308,7 +350,9 @@ pub async fn callback(
 
 /// `GET /api/auth/me`
 pub async fn me(user: CurrentUser) -> Json<serde_json::Value> {
-    Json(json!({ "user": UserView::from(&user.user) }))
+    let mut view = json!(UserView::from(&user.user));
+    view["is_admin"] = json!(user.is_admin);
+    Json(json!({ "user": view }))
 }
 
 /// `POST /api/auth/logout`

@@ -60,6 +60,8 @@ Runs PostgreSQL, a mock GitHub, the API, a worker using a fake Copilot CLI, and 
 | [docs/api.md](docs/api.md) · [docs/openapi.yaml](docs/openapi.yaml) | HTTP API contract |
 | [docs/security.md](docs/security.md) | Threat model and controls |
 | [docs/azure-setup.md](docs/azure-setup.md) | Provisioning Azure, the GitHub App, deployment and the Copilot smoke test |
+| [docs/docker-images.md](docs/docker-images.md) | Building and pushing the api, worker and frontend images to JFrog |
+| [docs/helm-deployment.md](docs/helm-deployment.md) | Deploying to AKS with Helm: Perf, then Prod |
 | [docs/operations.md](docs/operations.md) | Runbook: metrics, scaling, rotation, upgrades, troubleshooting |
 | [docs/local-development.md](docs/local-development.md) | Running and testing locally |
 | [agent-bundle/README.md](agent-bundle/README.md) | Installing the real agent |

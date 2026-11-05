@@ -8,6 +8,9 @@ use regex::Regex;
 
 static OWNER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$").unwrap());
+/// Enterprise Managed Users add an `_shortcode` suffix to the login (e.g. `mz7819_ATT`).
+static USER_LOGIN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:_[A-Za-z0-9]{1,20})?$").unwrap());
 static REPO_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._-]{1,100}$").unwrap());
 static MODEL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9._-]{0,63}$").unwrap());
 
@@ -20,6 +23,15 @@ pub fn owner(value: &str) -> Result<(), &'static str> {
         Ok(())
     } else {
         Err("Must be a GitHub account name (letters, digits and single hyphens, max 39 characters)")
+    }
+}
+
+/// GitHub user login, including Enterprise Managed User logins (`name_SHORTCODE`).
+pub fn user_login(value: &str) -> Result<(), &'static str> {
+    if USER_LOGIN_RE.is_match(value) {
+        Ok(())
+    } else {
+        Err("Must be a GitHub username")
     }
 }
 
@@ -149,6 +161,16 @@ mod tests {
         }
         for bad in ["", "-acme", "acme-", "ac me", "acme/x", "../x", &"a".repeat(40), "a_b"] {
             assert!(owner(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn user_logins() {
+        for ok in ["octocat", "mz7819_ATT", "octo-dev_acme", "A1"] {
+            assert!(user_login(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "_ATT", "a_", "a__b", "a_b_c", "-a", "a b", "a/b", "a_b-c"] {
+            assert!(user_login(bad).is_err(), "{bad}");
         }
     }
 

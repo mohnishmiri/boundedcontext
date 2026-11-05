@@ -1,0 +1,67 @@
+# Infrastructure & Platform Context generator — documents Helm charts, Kubernetes manifests, Terraform/IaC,
+# CI/CD pipelines (Azure DevOps, GitHub Actions, Jenkins), Dockerfiles and SQL/database files of a repository.
+# Complements the built-in `orchestrate` agent, which documents application code.
+
+schema_version: 1
+
+placeholder: false
+
+agent:
+  id: infra-context
+  display_name: Infrastructure & Platform Context (Helm / Terraform / DevOps / SQL)
+  description: >-
+    Generates an evidence-backed Infrastructure & Platform Context document (docs/INFRA-CONTEXT-<repo>.md) plus a
+    machine-readable inventory for Helm/Kubernetes, Terraform/IaC, CI/CD pipeline and SQL/database repositories.
+
+prompt:
+  template: |
+    You are the `infra-context` agent. Run the procedure yourself in this session; do not delegate the whole run.
+    Document the infrastructure and platform code of:
+      REPO_ROOT = {{workspace}}{{#scope_path}}/{{scope_path}}{{/scope_path}}
+      REPO_NAME = {{repo}}
+      FOCUS = {{focus}}
+    Write `docs/INFRA-CONTEXT-{{repo}}.md` and `docs/infra/infra-inventory.yaml` inside REPO_ROOT, and
+    `docs/infra/DATA-MODEL-{{repo}}.md` only if SQL or database files exist.
+    The `docs/` and `docs/infra/` folders already exist in REPO_ROOT (the portal created them). Write every output file directly to its final path there. Never stage, park or save output anywhere else: only files at those paths are kept. If a write fails, report the exact path and tool error.
+    Tools: only file read, write and search are available. Shell, network and memory tools are disabled on purpose, so do not run commands (helm, terraform, kubectl, sql clients, git). Never write placeholder files such as `.keep`.
+
+inputs:
+  - name: focus
+    label: Focus
+    help: AUTO documents every infrastructure area found. Pick one area to go deeper on it (the others are summarised).
+    kind: select
+    required: false
+    choices:
+      - AUTO
+      - HELM_K8S
+      - TERRAFORM
+      - DEVOPS_PIPELINES
+      - DATABASE_SQL
+    default: AUTO
+  - name: scope_path
+    label: Subdirectory (repository root)
+    help: Leave empty to analyse the repository root, or enter a subfolder (e.g. deploy/ or infra/terraform).
+    kind: path
+    required: false
+    default: ""
+    max_length: 200
+
+output:
+  paths:
+    - docs/INFRA-CONTEXT-*.md
+    - docs/infra/*.md
+    - docs/infra/*.yaml
+    - "**/docs/INFRA-CONTEXT-*.md"
+    - "**/docs/infra/*.md"
+    - "**/docs/infra/*.yaml"
+  min_bytes: 200
+  max_bytes: 2097152
+  # Keep whatever the agent wrote for manual review instead of failing on size / primary checks.
+  strict: false
+
+runtime:
+  timeout_secs: 7200
+  allow_tools: [read, write, edit, search]
+  deny_tools: [shell, url, memory]
+  disable_mcp_servers: [github-mcp-server]
+  repository_instructions: false

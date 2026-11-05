@@ -179,7 +179,8 @@ reads it before doing any analysis.
   source code is found.
 5. Verify `BCTX_PROMPT` exists at `prompts/universal-bounded-context.prompt.md` in this generator workspace.
   If missing → stop and report invalid prompt path.
-6. Create `OUTPUT_DIR` if it does not exist.
+6. Do not create `OUTPUT_DIR` separately: writing the first file creates it. Never write placeholder files
+   (`.keep`, `.gitkeep`) to create a folder.
 7. If `EVIDENCE_FILE` does not exist, create it from the template in the Appendix below,
    seeded with `SERVICE_NAME` and empty batch headings 1–5.
 
@@ -360,7 +361,8 @@ Rules:
 
 **Check B — Mermaid rendering validation (all generated artifacts)**
 
-Run this check against all generated artifacts for the selected profile.
+Run this check against all generated artifacts for the selected profile. It is a source review: no shell
+or renderer is available, and none is needed (the portal renders the diagrams).
 
 Scan every Mermaid code block across the generated artifact files for:
 1. Unquoted `participant`/node aliases containing `(`, `)`, `:`, `/`, or special characters

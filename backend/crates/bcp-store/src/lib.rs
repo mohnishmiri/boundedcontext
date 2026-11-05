@@ -18,7 +18,8 @@ pub use audit::{actions, NewAuditEvent};
 pub use events::EventRow;
 pub use generators::{NewUserGenerator, UserGeneratorRow};
 pub use jobs::{
-    ArtifactRow, CancelOutcome, JobFilter, JobGenerator, JobRow, NewArtifact, NewJob, PublishOutcome, PublishProgress,
+    ArtifactRow, CancelOutcome, JobFilter, JobGenerator, JobRow, NewArtifact, NewJob, PublishOptions, PublishOutcome,
+    PublishProgress,
 };
 pub use tasks::{ReapedTask, TaskRow};
 pub use users::{store_tokens_on, tokens_for_update, SessionUser, TokenRow, UserRow};

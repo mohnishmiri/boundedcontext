@@ -21,7 +21,7 @@ export function SignInPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4 dark:bg-gray-950">
-      <main className="w-full max-w-md space-y-6 rounded-lg border border-gray-200 bg-white p-8 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+      <main className="w-full max-w-md space-y-6 rounded-lg border border-t-4 border-gray-200 border-t-att bg-white p-8 shadow-sm dark:border-gray-800 dark:border-t-att dark:bg-gray-900">
         <div className="flex items-center gap-3">
           <img src="/favicon.svg" alt="" className="h-10 w-10" />
           <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Bounded Context Portal</h1>

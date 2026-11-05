@@ -42,6 +42,8 @@ futures = "0.3"
 globset = "0.4"
 hex = "0.4"
 jsonwebtoken = "9"
+# SMTP with STARTTLS; trusts the system store (corporate CAs) like reqwest.
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-native-certs"] }
 libc = "0.2"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }

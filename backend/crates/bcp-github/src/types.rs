@@ -9,6 +9,18 @@ pub struct GhUser {
     pub name: Option<String>,
     #[serde(default)]
     pub avatar_url: Option<String>,
+    /// Public profile email only; see `GitHubClient::list_user_emails` for the rest.
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct GhEmail {
+    pub email: String,
+    #[serde(default)]
+    pub primary: bool,
+    #[serde(default)]
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::CurrentUser;
+use crate::copilot_models::{account_api_base, ModelListError};
 use crate::error::{current_request_id, ApiJson, ApiResult};
 use crate::state::AppState;
 
@@ -59,7 +60,9 @@ pub async fn save(
     let owner = match state.github.get_authenticated_user(token).await {
         Ok(u) => u,
         Err(GitHubError::Unauthorized) => {
-            return Err(AppError::validation([("token", "GitHub rejected this token. Check it has not expired.")]).into())
+            return Err(
+                AppError::validation([("token", "GitHub rejected this token. Check it has not expired.")]).into()
+            )
         }
         Err(e) => return Err(e.to_service_error().into()),
     };
@@ -69,6 +72,9 @@ pub async fn save(
             format!("This token belongs to {}; use a token from your own account ({}).", owner.login, user.user.login),
         )
         .into());
+    }
+    if ensure_copilot_accepts(&state, token).await.is_err() {
+        return Err(AppError::validation([("token", NO_COPILOT_REQUESTS)]).into());
     }
     state.tokens.save_copilot_token(user.user.id, token).await?;
     forget_cached(&state, &user);
@@ -88,6 +94,27 @@ pub async fn remove(State(state): State<AppState>, user: CurrentUser) -> ApiResu
 fn forget_cached(state: &AppState, user: &CurrentUser) {
     state.cache.remove(&format!("quota:{}", user.user.id));
     state.cache.remove(&format!("models:{}", user.user.id));
+}
+
+const NO_COPILOT_REQUESTS: &str = "GitHub Copilot rejected this token. Edit it on GitHub and, under 'User \
+    permissions' (not 'Repository permissions'), add 'Copilot Requests', then save it here again.";
+
+/// Fails when GitHub Copilot itself rejects `token`, e.g. a fine-grained token without "Copilot Requests".
+/// Network trouble is not treated as a rejection.
+pub async fn ensure_copilot_accepts(state: &AppState, token: &str) -> Result<(), AppError> {
+    let Some(client) = &state.copilot_models else { return Ok(()) };
+    let base = state.github.get_copilot_user(token).await.ok().and_then(|u| account_api_base(&u));
+    match client.list(token, base.as_ref()).await {
+        Err(ModelListError::Rejected(status)) => {
+            tracing::info!(status, "Copilot API rejected a user's Copilot token");
+            Err(AppError::new(
+                ErrorCode::CopilotUnauthorized,
+                "GitHub Copilot rejects your Copilot token, so the job would fail. Open 'Copilot token' (top of the \
+                 page) and save a fine-grained token that has the 'Copilot Requests' user permission.",
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn audit(state: &AppState, user: &CurrentUser, action: &str) {

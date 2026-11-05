@@ -7,6 +7,7 @@
 pub mod config;
 mod generate;
 mod logger;
+mod notify;
 pub mod publish;
 
 use std::future::Future;
@@ -141,6 +142,7 @@ pub struct Worker {
     pub(crate) adapter: Arc<dyn AgentAdapter>,
     pub(crate) adapters: AdapterFactory,
     pub(crate) resolver: GeneratorResolver,
+    pub(crate) mailer: Option<notify::Mailer>,
     runtime_ready: AtomicBool,
 }
 
@@ -155,7 +157,28 @@ impl Worker {
         let tokens = TokenService::new(store.clone(), github.clone(), cfg.common.cipher.clone());
         let adapter = adapters(bundle.clone());
         let resolver = GeneratorResolver::new(github.clone(), cfg.work_dir.clone());
-        Self { cfg, store, github, tokens, bundle, adapter, adapters, resolver, runtime_ready: AtomicBool::new(false) }
+        let mailer = cfg.smtp.as_ref().and_then(|smtp| match notify::Mailer::new(smtp) {
+            Ok(m) => {
+                tracing::info!(host = %smtp.host, port = smtp.port, "completion emails enabled");
+                Some(m)
+            }
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "invalid SMTP settings; completion emails are disabled");
+                None
+            }
+        });
+        Self {
+            cfg,
+            store,
+            github,
+            tokens,
+            bundle,
+            adapter,
+            adapters,
+            resolver,
+            mailer,
+            runtime_ready: AtomicBool::new(false),
+        }
     }
 
     /// Builds a worker from configuration with the Copilot CLI adapter.

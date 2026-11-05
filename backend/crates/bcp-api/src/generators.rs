@@ -54,6 +54,18 @@ fn builtin_labels(state: &AppState) -> (String, String) {
     )
 }
 
+/// Name, description, loaded bundle and directory of a bundled generator.
+fn bundled_labels<'a>(state: &'a AppState, id: &str) -> Option<(String, String, &'a Arc<AgentBundle>, &'a str)> {
+    let g = state.registry.bundled_by_id(id)?;
+    let bundle = state.bundled.get(id)?;
+    Some((
+        g.name.clone().unwrap_or_else(|| bundle.display_name().to_owned()),
+        g.description.clone().unwrap_or_else(|| bundle.description().to_owned()),
+        bundle,
+        g.dir.as_str(),
+    ))
+}
+
 fn user_repo(row: &UserGeneratorRow) -> GeneratorRepo {
     GeneratorRepo {
         owner: row.owner.clone(),
@@ -70,6 +82,11 @@ fn user_view(row: &UserGeneratorRow) -> Value {
 /// `GET /api/generators`
 pub async fn list(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
     let mut items = vec![builtin_view(&state)];
+    for g in state.registry.bundled() {
+        if let Some((name, description, _, _)) = bundled_labels(&state, &g.id) {
+            items.push(view(&g.id, &name, Some(&description), "builtin", None, false));
+        }
+    }
     for c in state.registry.curated() {
         items.push(view(&c.id, &c.name, c.description.as_deref(), "curated", Some(&c.repository), false));
     }
@@ -154,8 +171,9 @@ pub async fn remove(State(state): State<AppState>, user: CurrentUser, Path(id): 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Resolves a generator id (`builtin`, a curated id or a saved generator's UUID) to a loaded bundle pinned to
-/// the repository's current head. Allowlist and access are re-checked every time.
+/// Resolves a generator id (`builtin`, a bundled or curated id or a saved generator's UUID) to a loaded bundle;
+/// repository generators are pinned to the repository's current head. Allowlist and access are re-checked every
+/// time.
 pub async fn select(
     state: &AppState,
     user: &CurrentUser,
@@ -167,6 +185,13 @@ pub async fn select(
         return Ok(SelectedGenerator {
             job: JobGenerator::builtin(name),
             bundle: state.bundle.clone(),
+            resolved: None,
+        });
+    }
+    if let Some((name, _, bundle, dir)) = bundled_labels(state, id) {
+        return Ok(SelectedGenerator {
+            job: JobGenerator::bundled(id, name, dir),
+            bundle: bundle.clone(),
             resolved: None,
         });
     }
@@ -224,7 +249,7 @@ pub async fn agent_info(
     user: CurrentUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    if id == BUILTIN_ID {
+    if id == BUILTIN_ID || state.bundled.contains_key(&id) {
         let selected = select(&state, &user, "", &id).await?;
         return Ok(Json(agent_json(&selected)));
     }

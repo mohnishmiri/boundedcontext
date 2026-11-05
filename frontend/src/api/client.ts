@@ -14,6 +14,8 @@ import type {
   GeneratorList,
   Job,
   JobDiff,
+  JobListPage,
+  JobScope,
   JobStatus,
   JobSummary,
   LogPage,
@@ -309,15 +311,35 @@ export function createBatch(body: CreateBatchRequest): Promise<BatchResponse> {
 export function listJobs(
   params: {
     status?: JobStatus;
+    scope?: JobScope;
+    requested_by?: string;
     owner?: string;
     repo?: string;
     batch_id?: string;
+    q?: string;
     page?: number;
     per_page?: number;
   },
   signal?: AbortSignal,
-): Promise<Page<JobSummary>> {
+): Promise<JobListPage> {
   return request(JOBS, { query: params, signal });
+}
+
+export type JobListQuery = Omit<Parameters<typeof listJobs>[0], 'page' | 'per_page'>;
+
+/** Every page of a job listing (100 per request, the API maximum), stopping after `maxItems`. */
+export async function listAllJobs(
+  params: JobListQuery,
+  maxItems = 5_000,
+  signal?: AbortSignal,
+): Promise<{ items: JobSummary[]; truncated: boolean }> {
+  const items: JobSummary[] = [];
+  for (let page = 1; ; page++) {
+    const res = await listJobs({ ...params, page, per_page: 100 }, signal);
+    items.push(...res.items);
+    if (!res.has_more || res.items.length === 0) return { items, truncated: false };
+    if (items.length >= maxItems) return { items, truncated: true };
+  }
 }
 
 export function getJob(id: string, signal?: AbortSignal): Promise<Job> {
@@ -332,10 +354,15 @@ export function getJobDiff(id: string, signal?: AbortSignal): Promise<JobDiff> {
   return request(`${JOBS}/${seg(id)}/diff`, { signal });
 }
 
-export function requestPullRequest(
-  id: string,
-  body: { title: string; publish_central: boolean },
-): Promise<Job> {
+export type PullRequestBody = {
+  title: string;
+  publish_central: boolean;
+  reviewers: string[];
+  /** `owner/repo` overriding the generator's default central repository. */
+  central_repo?: string;
+};
+
+export function requestPullRequest(id: string, body: PullRequestBody): Promise<Job> {
   return request(`${JOBS}/${seg(id)}/pull-request`, { method: 'POST', body });
 }
 
@@ -349,6 +376,11 @@ export function retryJob(id: string): Promise<Job> {
 
 export function jobOutputUrl(id: string): string {
   return buildUrl(`${JOBS}/${seg(id)}/output`);
+}
+
+/** Every generated file of the job as one ZIP. */
+export function jobArchiveUrl(id: string): string {
+  return buildUrl(`${JOBS}/${seg(id)}/archive`);
 }
 
 export function jobEventsUrl(id: string): string {

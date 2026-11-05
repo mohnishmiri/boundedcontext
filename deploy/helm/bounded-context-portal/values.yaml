@@ -1,5 +1,6 @@
 # Default values for bounded-context-portal.
-# Environment overlays: values-dev.yaml, values-staging.yaml, values-prod.yaml.
+# Environment overlays: values-perf.yaml (ragaflow-boundedcontext.test.att.com), values-prod.yaml
+# (ragaflow-boundedcontext.web.att.com); values-dev.yaml / values-staging.yaml are examples.
 # Never put secrets in values files — secrets come from Azure Key Vault (secrets.mode=csi).
 
 # Resource name prefix. Defaults to the release name (e.g. release "bcp" -> bcp-api, bcp-worker, bcp-frontend).
@@ -7,7 +8,8 @@ fullnameOverride: ""
 nameOverride: ""
 
 global:
-  # Registry prefix for all images, e.g. myacr.azurecr.io. AKS pulls via the kubelet identity (--attach-acr).
+  # Registry prefix (pull side) for all images, e.g. artifact.it.att.com:22609/<path> (JFrog; needs imagePullSecrets) or
+  # myacr.azurecr.io (AKS pulls via the kubelet identity with --attach-acr).
   imageRegistry: ""
   imagePullSecrets: []
 
@@ -18,21 +20,28 @@ image:
 # Non-secret application configuration (rendered into ConfigMaps; names follow .env.example).
 # ---------------------------------------------------------------------------------------------------------
 config:
-  # Browser-facing origin. Must match the GitHub App callback URL host and the ingress host.
+  # Browser-facing origin. Must match the ingress host (and the OAuth/GitHub App callback URL when one is used).
   publicUrl: "https://bcp.example.com"
+  # PostgreSQL connections per api/worker pod (BCP_DATABASE_MAX_CONNECTIONS). Mind the server's max_connections
+  # across all replicas.
+  databaseMaxConnections: 500
   github:
     apiUrl: "https://api.github.com"
     webUrl: "https://github.com"
     # Server-side OAuth token exchange base; empty = webUrl.
     oauthUrl: ""
+    # GitHub App id; empty = no GitHub App (the github-app-private-key secret is then not needed).
     appId: ""
     appSlug: ""
+    # OAuth/GitHub App client id; empty = users sign in with a personal access token (the
+    # github-client-secret secret is then not needed).
     clientId: ""
   logFormat: json
   rustLog: "info,bcp=info,sqlx=warn"
   modelsShowUnverified: false
   # In-image locations (override only if you build custom images).
   agentBundleDir: /opt/agent-bundle
+  generatorsDir: /opt/generators
   modelsFile: /etc/bcp/models.yaml
   generatorsFile: /etc/bcp/generators.yaml
   # Copilot API used to list the models each signed-in user can use. Empty = https://api.githubcopilot.com
@@ -41,12 +50,33 @@ config:
   copilotIntegrationId: copilot-developer-cli
   # Most repositories one batch request may cover.
   batchMaxRepos: 25
+  # GitHub logins that may view every user's jobs, logs and outputs (read-only), e.g. [mz7819_ATT].
+  adminLogins: []
   otel:
     # OTLP gRPC endpoint, e.g. http://otel-collector.monitoring:4317. Empty disables trace export.
     endpoint: ""
+  # Outbound HTTP(S) proxy for the api and worker (GitHub, Copilot CLI); sets HTTP(S)_PROXY / NO_PROXY in both
+  # cases. Empty = direct egress. PostgreSQL connections never use it.
+  proxy:
+    http: ""
+    https: ""
+    noProxy: "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,169.254.169.254"
   # Extra non-secret env vars added to every component's ConfigMap.
   extraEnv:
     BCP_CENTRAL_REPO: ATT-DP1/apm0014313-ragaflow-ai-context-docs
+  # Email to the requester when bounded-context generation completes (worker only). Empty host disables it.
+  # The password comes from Key Vault (secrets.keyVault.objects.smtpPassword) whenever user is set.
+  smtp:
+    host: ""
+    port: 587
+    user: ""
+    fromAddress: ""
+    fromName: "AT&T Bounded Context Portal"
+    # STARTTLS (implicit TLS on port 465). false = clear text, local test relays only.
+    useTls: true
+    # Used when GitHub shares no email for the requester: <login>@<domain>, enterprise "_shortcode" removed
+    # (mz7819_ATT -> mz7819@att.com). Empty = skip the email for those users.
+    fallbackDomain: ""
 
 # Override the model catalog baked into the api and worker images (config/models.yaml). When non-empty, the
 # chart creates a ConfigMap and mounts it at config.modelsFile in BOTH api and worker pods.
@@ -69,17 +99,31 @@ agentBundle:
   checksum: ""
 
 # ---------------------------------------------------------------------------------------------------------
-# Secrets. Files are mounted at secrets.mountPath and consumed through *_FILE env vars:
-#   database-url, github-client-secret, github-app-private-key, token-encryption-key
+# Secrets. Files are mounted at secrets.mountPath and consumed through *_FILE env vars. Always required:
+#   database-url          postgres://<user>:<password>@<server>.postgres.database.azure.com:5432/bcp?sslmode=require
+#                         (percent-encode special characters in the password, e.g. @ -> %40)
+#   token-encryption-key  32 random bytes, base64 (openssl rand -base64 32); never change it once in use
+# Only when the feature is configured:
+#   github-client-secret    config.github.clientId set (OAuth sign-in)
+#   github-app-private-key  config.github.appId set (GitHub App)
+#   copilot-github-token    secrets.copilotSharedToken=true (worker only)
+#   smtp-password           config.smtp.host and config.smtp.user set (worker only)
 # ---------------------------------------------------------------------------------------------------------
 secrets:
   # csi            -> Azure Key Vault via Secrets Store CSI driver + Workload Identity (recommended)
+  # akv2k8s        -> Azure Key Vault via the akv2k8s controller (AzureKeyVaultSecret -> Kubernetes Secret per
+  #                   object); no pod identity needed. The api then runs migrations at start-up (no hook).
   # existingSecret -> a Kubernetes Secret you manage (dev clusters / kind); same key names as above
-  mode: csi
+  mode: akv2k8s
   mountPath: /mnt/secrets
   existingSecret: ""
+  akv2k8s:
+    apiVersion: spv.no/v2beta1
+  # Run EVERY job with one shared Copilot token (BCP_COPILOT_GITHUB_TOKEN) instead of each requester's own
+  # token and credits. Leave false unless intended.
+  copilotSharedToken: false
   keyVault:
-    name: ""
+    name: "attcc-eastus2-perf-kv"
     tenantId: ""
     # Key Vault secret names. Each is mounted as a file with the same name.
     objects:
@@ -87,6 +131,8 @@ secrets:
       githubClientSecret: github-client-secret
       githubAppPrivateKey: github-app-private-key
       tokenEncryptionKey: token-encryption-key
+      copilotGithubToken: copilot-github-token
+      smtpPassword: smtp-password
     # Rotation poll interval is configured on the AKS add-on (--rotation-poll-interval); pods read files at
     # start-up, so rotate by restarting (see docs/operations.md).
   # Kubernetes Secret synced from Key Vault (by the api pod's CSI mount) that holds database-url for KEDA's
@@ -251,6 +297,9 @@ frontend:
   replicas: 2
   # Where nginx proxies /api (local compose parity). Empty = http://<fullname>-api:8080.
   apiUpstream: ""
+  # Extra origin(s) allowed for images in the Content-Security-Policy (GitHub avatars). For GitHub Enterprise
+  # Server use its avatar origin, e.g. https://ghe.example.com.
+  cspImgSrc: https://avatars.githubusercontent.com
   # nginx renders /etc/nginx/templates/*.template into this directory at start-up, so it must be writable
   # when the root filesystem is read-only.
   writableConfDir: /etc/nginx/conf.d
@@ -297,8 +346,8 @@ migrations:
 # ---------------------------------------------------------------------------------------------------------
 ingress:
   enabled: true
-  className: webapprouting.kubernetes.azure.com
-  host: bcp.example.com
+  className: nginx
+  host: ragaflow-boundedcontext.test.att.com
   annotations: {}
   # SSE streams (/api/bounded-context/jobs/{id}/events) stay open for the whole run.
   sseTimeoutSeconds: 3600
@@ -309,12 +358,14 @@ ingress:
     keyVaultCertUri: ""
     # Otherwise an existing TLS secret (e.g. issued by cert-manager).
     secretName: ""
+    # secrets.mode=akv2k8s: Key Vault certificate name, synced by akv2k8s into secret <fullname>-tls.
+    akv2k8sCertName: ""
 
 # ---------------------------------------------------------------------------------------------------------
 # NetworkPolicies (Azure NPM, Calico or Cilium). Default-deny plus explicit allows.
 # ---------------------------------------------------------------------------------------------------------
 networkPolicy:
-  enabled: true
+  enabled: false
   ingressController:
     namespaceSelector:
       kubernetes.io/metadata.name: app-routing-system
@@ -338,6 +389,15 @@ networkPolicy:
     namespaceSelector:
       kubernetes.io/metadata.name: monitoring
     port: 4317
+  # Egress to an in-cluster HTTP proxy (config.proxy).
+  proxy:
+    enabled: false
+    namespaceSelector:
+      kubernetes.io/metadata.name: conexus
+    port: 3128
+  # Worker egress to the SMTP relay (config.smtp.host set). Narrow cidrs to the relay's address when known.
+  smtp:
+    cidrs: ["0.0.0.0/0"]
   # CiliumNetworkPolicy with toFQDNs (Azure CNI powered by Cilium + Advanced Container Networking Services).
   cilium:
     enabled: false

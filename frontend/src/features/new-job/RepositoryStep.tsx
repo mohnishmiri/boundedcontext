@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import { useRepositories } from '../../api/queries';
+import { REPOS_PER_PAGE, useRepositories } from '../../api/queries';
 import type { Repository } from '../../api/types';
 import { ErrorPanel } from '../../components/ErrorPanel';
 import { Pagination } from '../../components/Pagination';
@@ -25,6 +25,8 @@ export function RepositoryStep({
   const q = useDebouncedValue(query.trim(), 300);
   const repos = useRepositories(owner, q, page);
   const full = Object.keys(selection).length >= MAX_BATCH_REPOS;
+  // Typed but not yet sent (debounce), or sent and still loading: the list shown is from the previous search.
+  const searching = query.trim() !== q || repos.isPlaceholderData;
 
   return (
     <fieldset className="space-y-3">
@@ -40,11 +42,17 @@ export function RepositoryStep({
           placeholder="Filter by name"
           value={query}
           autoComplete="off"
+          aria-describedby="repo-search-status"
           onChange={(e) => {
             setQuery(e.target.value);
             setPage(1);
           }}
         />
+        <div id="repo-search-status" className="mt-1 min-h-5">
+          {searching && (
+            <Spinner size="sm" label={query.trim() ? 'Searching repositories…' : 'Loading repositories…'} />
+          )}
+        </div>
       </div>
       <p className="text-xs text-gray-500 dark:text-gray-400">
         Tick every repository to document. Your selection is kept when you search, change page or switch account.
@@ -54,15 +62,28 @@ export function RepositoryStep({
           You can select up to {MAX_BATCH_REPOS} repositories per batch. Remove one to select another.
         </p>
       )}
-      {repos.isPending && <Spinner label="Loading repositories…" />}
+      {repos.isPending && (
+        <div className="space-y-2">
+          <Spinner label="Loading repositories from GitHub…" />
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            The first load can take a few seconds for large organisations.
+          </p>
+        </div>
+      )}
       {repos.isError && <ErrorPanel error={repos.error} title="Could not load repositories" />}
-      {repos.data && repos.data.items.length === 0 && (
+      {repos.data && !searching && repos.data.items.length === 0 && (
         <p className="text-sm text-gray-600 dark:text-gray-300">
-          No repositories found. You only see repositories you can access where the GitHub App is installed.
+          {q ? `No repositories match “${q}”.` : 'No repositories found.'} You only see repositories you can access
+          where the GitHub App is installed.
         </p>
       )}
       {repos.data && repos.data.items.length > 0 && (
-        <ul className="max-h-80 divide-y divide-gray-100 overflow-y-auto rounded-md border border-gray-200 dark:divide-gray-800 dark:border-gray-700">
+        <ul
+          aria-busy={searching}
+          className={`max-h-80 divide-y divide-gray-100 overflow-y-auto rounded-md border border-gray-200 transition-opacity dark:divide-gray-800 dark:border-gray-700 ${
+            searching ? 'opacity-50' : ''
+          }`}
+        >
           {repos.data.items.map((r) => {
             const checked = repoKey(r.owner, r.name) in selection;
             const blocked = full && !checked;
@@ -116,6 +137,8 @@ export function RepositoryStep({
           label="Repository pages"
           page={page}
           hasMore={repos.data.has_more}
+          total={repos.data.total}
+          perPage={REPOS_PER_PAGE}
           onPageChange={setPage}
           disabled={repos.isFetching}
         />

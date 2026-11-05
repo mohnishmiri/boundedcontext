@@ -42,14 +42,13 @@ export function CopilotTokenPanel({ open, onClose }: { open: boolean; onClose: (
     <Alert tone={s.needed ? 'warning' : 'info'} title={s.needed ? 'Add a Copilot token to run generations' : 'Copilot token'} className="mb-4">
       <p>
         Generations run on <strong>your own</strong> Copilot credits. Copilot does not accept classic tokens (ghp_), so
-        add a separate Copilot token. Recommended (no organisation approval needed): run{' '}
-        <code className="font-mono">gh auth login --web</code> once, then paste the output of{' '}
-        <code className="font-mono">gh auth token</code> (starts with <code className="font-mono">gho_</code>). A
-        fine-grained token with only the <strong>Copilot Requests</strong> permission also runs jobs, but may not list
-        your models.{' '}
+        add a Copilot token once; it is stored encrypted and used for all your jobs.{' '}
         <a href={NEW_TOKEN_URL} target="_blank" rel="noopener noreferrer" className={linkClass}>
           Create a fine-grained token
-        </a>
+        </a>{' '}
+        with <strong>Resource owner</strong> = your personal account and, under <strong>Account permissions</strong>,
+        only <strong>Copilot Requests</strong> (no organisation approval needed), then paste it here (starts with{' '}
+        <code className="font-mono">github_pat_</code>).
       </p>
       <form
         className="flex flex-wrap items-start gap-2"
@@ -61,7 +60,7 @@ export function CopilotTokenPanel({ open, onClose }: { open: boolean; onClose: (
         <input
           type="password"
           aria-label="Copilot token"
-          placeholder="gho_… (gh auth token)"
+          placeholder="github_pat_…"
           autoComplete="off"
           value={token}
           onChange={(e) => setToken(e.target.value)}

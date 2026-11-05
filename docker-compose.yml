@@ -3,18 +3,22 @@
 #   scripts/start.sh                    (picks free ports, waits until healthy, prints the URLs)
 #   scripts/stop.sh                     (--wipe also deletes the database and dev secrets)
 #
-# Plain compose works too: `docker compose up --build`, then open http://localhost:3000 and sign in through the
-# mock GitHub (e.g. as "octocat"). Host ports can be moved if they are taken: BCP_PG_PORT, BCP_API_PORT,
-# BCP_UI_PORT, BCP_MOCK_PORT (BCP_PUBLIC_URL must then match the UI port, e.g. http://localhost:3001).
+# Plain compose works too: `COMPOSE_PROFILES=local-db docker compose up --build`, then open http://localhost:3000
+# and sign in through the mock GitHub (e.g. as "octocat"). Host ports can be moved if they are taken: BCP_PG_PORT,
+# BCP_API_PORT, BCP_UI_PORT, BCP_MOCK_PORT (BCP_PUBLIC_URL must then match the UI port, e.g. http://localhost:3001).
 #
-# Components: PostgreSQL, mock GitHub (OAuth + REST, seeded fixtures), API, worker running the *fake* Copilot
+# Components: PostgreSQL (profile local-db, or an external server through BCP_EXTERNAL_DATABASE_URL), mock GitHub
+# (OAuth + REST, seeded fixtures), API, worker running the *fake* Copilot
 # CLI, and the frontend (nginx). Everything here is for development only; see docs/local-development.md for
 # running against real GitHub / Copilot.
 
 name: bounded-context-portal
 
 x-backend-env: &backend-env
-  BCP_DATABASE_URL: postgres://bcp:bcp@postgres:5432/bcp
+  # External PostgreSQL (e.g. Azure Database for PostgreSQL) when BCP_EXTERNAL_DATABASE_URL is set; otherwise the
+  # local `postgres` service (profile "local-db", enabled by scripts/start.sh).
+  BCP_DATABASE_URL: ${BCP_EXTERNAL_DATABASE_URL:-postgres://bcp:bcp@postgres:5432/bcp}
+  BCP_DATABASE_MAX_CONNECTIONS: ${BCP_DATABASE_MAX_CONNECTIONS:-10}
   BCP_PUBLIC_URL: ${BCP_PUBLIC_URL:-http://localhost:3000}
   # Uses real GitHub (https://api.github.com / https://github.com) by default.
   # Supports GitHub Personal Access Token (BCP_GITHUB_PAT or GITHUB_TOKEN in .env or browser sign-in prompt).
@@ -38,6 +42,7 @@ x-backend-env: &backend-env
 
 services:
   postgres:
+    profiles: [local-db]
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: bcp
@@ -105,14 +110,17 @@ services:
       BCP_COPILOT_API_URL: ${BCP_COPILOT_API_URL:-}
       # Only whether a shared token is set; the token itself stays with the worker.
       BCP_COPILOT_SHARED_TOKEN: ${BCP_COPILOT_GITHUB_TOKEN:+true}
+      # GitHub logins that may read every user's jobs (comma-separated).
+      BCP_ADMIN_LOGINS: ${BCP_ADMIN_LOGINS:-}
     ports: ["127.0.0.1:${BCP_API_PORT:-8080}:8080"]
     volumes:
       - devsecrets:/secrets:ro
       - ./agent-bundle:/opt/agent-bundle:ro
+      - ./generators:/opt/generators:ro
       - ./config/models.yaml:/etc/bcp/models.yaml:ro
       - ./config/generators.yaml:/etc/bcp/generators.yaml:ro
     depends_on:
-      postgres: { condition: service_healthy }
+      postgres: { condition: service_healthy, required: false }
       dev-secrets: { condition: service_completed_successfully }
       mock-github: { condition: service_started }
 
@@ -129,9 +137,20 @@ services:
       <<: *backend-env
       BCP_COPILOT_BIN: ${BCP_COPILOT_BIN:-/usr/local/bin/fake-copilot}
       BCP_COPILOT_GITHUB_TOKEN: ${BCP_COPILOT_GITHUB_TOKEN:-}
+      # Administrators are copied on completion emails.
+      BCP_ADMIN_LOGINS: ${BCP_ADMIN_LOGINS:-}
       BCP_MAX_JOB_TIMEOUT_SECS: ${BCP_MAX_JOB_TIMEOUT_SECS:-18000}
       BCP_WORKER_CONCURRENCY: "2"
       BCP_GENERATE_MAX_ATTEMPTS: "1"
+      # Completion emails (disabled while SMTP_HOST is empty).
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-AT&T Bounded Context Portal}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      BCP_NOTIFY_EMAIL_DOMAIN: ${BCP_NOTIFY_EMAIL_DOMAIN:-}
     read_only: true
     # exec: Copilot CLI extracts and loads a native addon under the per-job HOME in /work.
     tmpfs: ["/work:uid=10001,gid=10001,mode=0700,exec", "/tmp:mode=1777", "/home/worker:uid=10001,gid=10001,mode=0700"]
@@ -140,6 +159,7 @@ services:
     volumes:
       - devsecrets:/secrets:ro
       - ./agent-bundle:/opt/agent-bundle:ro
+      - ./generators:/opt/generators:ro
       - ./config/models.yaml:/etc/bcp/models.yaml:ro
     depends_on:
       api: { condition: service_started }

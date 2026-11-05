@@ -29,6 +29,8 @@ pub struct Inner {
     pub agent: AgentDescriptor,
     pub catalog: ModelCatalog,
     pub registry: GeneratorRegistry,
+    /// Bundled generators (registry `bundled`), loaded at startup, by id.
+    pub bundled: HashMap<String, Arc<AgentBundle>>,
     pub resolver: GeneratorResolver,
     /// `None` when live model listing is disabled (catalog only).
     pub copilot_models: Option<CopilotModelsClient>,
@@ -46,6 +48,7 @@ impl Deref for AppState {
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: ApiConfig,
         store: Store,
@@ -53,6 +56,7 @@ impl AppState {
         bundle: Arc<AgentBundle>,
         catalog: ModelCatalog,
         registry: GeneratorRegistry,
+        bundled: HashMap<String, Arc<AgentBundle>>,
         copilot_models: Option<CopilotModelsClient>,
     ) -> Self {
         let tokens = TokenService::new(store.clone(), github.clone(), cfg.common.cipher.clone());
@@ -70,6 +74,7 @@ impl AppState {
             agent,
             catalog,
             registry,
+            bundled,
             resolver,
             copilot_models,
             job_events,

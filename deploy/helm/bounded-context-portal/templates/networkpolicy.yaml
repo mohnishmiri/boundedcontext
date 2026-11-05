@@ -8,6 +8,7 @@
     - { protocol: TCP, port: 53 }
 {{- end -}}
 {{- define "bcp.np.postgresEgress" -}}
+{{- if not .postgres.cidrs }}{{ fail "networkPolicy.postgres.cidrs is required (PostgreSQL server IP/32 or delegated subnet)" }}{{ end -}}
 - to:
     {{- range .postgres.cidrs }}
     - ipBlock:
@@ -38,6 +39,16 @@
           {{- toYaml .otlp.namespaceSelector | nindent 10 }}
   ports:
     - { protocol: TCP, port: {{ .otlp.port }} }
+{{- end }}
+{{- end -}}
+{{- define "bcp.np.proxyEgress" -}}
+{{- if .proxy.enabled }}
+- to:
+    - namespaceSelector:
+        matchLabels:
+          {{- toYaml .proxy.namespaceSelector | nindent 10 }}
+  ports:
+    - { protocol: TCP, port: {{ .proxy.port }} }
 {{- end }}
 {{- end -}}
 {{- if .Values.networkPolicy.enabled }}
@@ -118,6 +129,7 @@ spec:
     {{- with (include "bcp.np.postgresEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
     {{- with (include "bcp.np.httpsEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
     {{- with (include "bcp.np.otlpEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.proxyEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
 {{- end }}
 {{- if .Values.worker.enabled }}
 ---
@@ -144,6 +156,16 @@ spec:
     {{- with (include "bcp.np.postgresEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
     {{- with (include "bcp.np.httpsEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
     {{- with (include "bcp.np.otlpEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- with (include "bcp.np.proxyEgress" $np | trim) }}{{ . | nindent 4 }}{{- end }}
+    {{- if .Values.config.smtp.host }}
+    - to:
+        {{- range $np.smtp.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.config.smtp.port }} }
+    {{- end }}
 {{- end }}
 {{- if .Values.migrations.enabled }}
 ---

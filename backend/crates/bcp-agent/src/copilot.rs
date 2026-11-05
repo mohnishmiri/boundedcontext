@@ -106,10 +106,7 @@ impl CopilotCliAdapter {
         args.extend(["--add-dir".into(), agent_dir.display().to_string()]);
         args.extend(["--log-dir".into(), scratch.join("logs").display().to_string()]);
         args.extend(["--share".into(), scratch.join("transcript.md").display().to_string()]);
-        args.extend([
-            "--usage-output-file".into(),
-            scratch.join(crate::usage::USAGE_FILE).display().to_string(),
-        ]);
+        args.extend(["--usage-output-file".into(), scratch.join(crate::usage::USAGE_FILE).display().to_string()]);
 
         let home = scratch.join("home");
         let mut env: Vec<(String, String)> =
@@ -277,7 +274,21 @@ impl AgentAdapter for CopilotCliAdapter {
         let duration = started.elapsed();
         if !status.success() {
             let tail: Vec<String> = tail.lock().map(|t| t.iter().cloned().collect()).unwrap_or_default();
-            return Err(AgentError::Failed(classify_failure(status.code(), &tail)));
+            let mut err = classify_failure(status.code(), &tail);
+            if err.code == ErrorCode::CopilotUnauthorized {
+                let lines = cli_auth_log_lines(&req.scratch_dir.join("logs"), &redactor);
+                for line in &lines {
+                    sink.log(LogLevel::Warn, &format!("Copilot CLI log: {line}")).await;
+                }
+                let missing_permission = lines
+                    .iter()
+                    .map(|l| l.to_ascii_lowercase())
+                    .any(|l| l.contains("does not have") && l.contains("copilot requests") && l.contains("permission"));
+                if missing_permission {
+                    err = AppError::new(ErrorCode::CopilotUnauthorized, MISSING_COPILOT_REQUESTS).retryable(false);
+                }
+            }
+            return Err(AgentError::Failed(err));
         }
         let transcript = req.scratch_dir.join("transcript.md");
         sink.log(LogLevel::Info, &format!("Agent finished in {:.1}s", duration.as_secs_f64())).await;
@@ -287,6 +298,28 @@ impl AgentAdapter for CopilotCliAdapter {
             cli_version: Some(cli_version),
         })
     }
+}
+
+const MISSING_COPILOT_REQUESTS: &str = "Your Copilot token does not have the 'Copilot Requests' permission. On \
+    GitHub, edit the fine-grained token and add 'Copilot Requests' under 'User permissions' (not 'Repository \
+    permissions'), then save it again under 'Copilot token' at the top of the portal.";
+
+/// Error lines from the CLI's own log files: they name the request GitHub rejected and why.
+fn cli_auth_log_lines(dir: &Path, redactor: &Redactor) -> Vec<String> {
+    const KEYS: &[&str] = &["[error]", " 401", " 403", "unauthorized", "forbidden"];
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        for l in text.lines() {
+            let lower = l.to_ascii_lowercase();
+            if KEYS.iter().any(|k| lower.contains(k)) {
+                out.push(bcp_core::redact::truncate_chars(&redactor.line(l), 400));
+            }
+        }
+    }
+    let skip = out.len().saturating_sub(25);
+    out.into_iter().skip(skip).collect()
 }
 
 fn unavailable(msg: &str) -> AgentError {

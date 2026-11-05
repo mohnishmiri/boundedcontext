@@ -31,8 +31,15 @@ pub struct ExtractStats {
     pub skipped_unsafe: u64,
 }
 
-fn too_large(what: &str) -> AppError {
-    AppError::new(ErrorCode::RepositoryTooLarge, format!("The repository exceeds the portal's {what} limit."))
+fn too_large(what: &str, limit: String) -> AppError {
+    AppError::new(
+        ErrorCode::RepositoryTooLarge,
+        format!("The repository exceeds the portal's {what} limit ({limit}). Ask the administrators to raise it."),
+    )
+}
+
+fn mib(bytes: u64) -> String {
+    format!("{} MiB", bytes / 1_048_576)
 }
 
 /// Extracts a GitHub tarball (`<owner>-<repo>-<sha>/...`) into `dest`, stripping the top-level directory.
@@ -79,11 +86,11 @@ pub fn extract_tar_reader<R: Read>(reader: R, dest: &Path, limits: ExtractLimits
         }
         stats.files += 1;
         if stats.files > limits.max_files {
-            return Err(too_large("file count"));
+            return Err(too_large("file count", format!("{} files", limits.max_files)));
         }
         let declared = entry.header().size().map_err(invalid)?;
         if stats.bytes.saturating_add(declared) > limits.max_bytes {
-            return Err(too_large("size"));
+            return Err(too_large("size", mib(limits.max_bytes)));
         }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| AppError::internal(format!("creating directory: {e}")))?;
@@ -99,7 +106,7 @@ pub fn extract_tar_reader<R: Read>(reader: R, dest: &Path, limits: ExtractLimits
         let copied = io::copy(&mut (&mut entry).take(remaining + 1), &mut out).map_err(invalid)?;
         stats.bytes += copied;
         if stats.bytes > limits.max_bytes {
-            return Err(too_large("size"));
+            return Err(too_large("size", mib(limits.max_bytes)));
         }
         out.flush().map_err(|e| AppError::internal(format!("writing {rel}: {e}")))?;
     }
@@ -224,9 +231,39 @@ pub fn capture_base_outputs(bundle: &AgentBundle, root: &Path, snap: &Snapshot) 
         .collect()
 }
 
-// ----------------------------------------------------------------------------------------------------------
-// Output validation
-// ----------------------------------------------------------------------------------------------------------
+/// Creates the literal folders of the output globs (e.g. `docs/archetypes`) at the root and under each scope
+/// directory, because the agent has no shell to create them and stages its files elsewhere when they are
+/// missing. Empty folders never appear in snapshots. Returns the folders that were created.
+pub fn prepare_output_dirs(bundle: &AgentBundle, root: &Path, scopes: &[String]) -> Vec<String> {
+    let mut bases = vec![String::new()];
+    for scope in scopes {
+        let scope = scope.trim_matches('/');
+        if scope.is_empty() || validate::relative_path(scope).is_err() {
+            continue;
+        }
+        if root.join(scope).symlink_metadata().is_ok_and(|m| m.is_dir()) {
+            bases.push(format!("{scope}/"));
+        }
+    }
+    let mut created = Vec::new();
+    for glob in bundle.output_paths() {
+        let glob = glob.strip_prefix("**/").unwrap_or(glob);
+        let parts: Vec<&str> = glob.split('/').collect();
+        let literal: Vec<&str> =
+            parts[..parts.len() - 1].iter().take_while(|c| !c.contains(['*', '?', '[', '{'])).copied().collect();
+        if literal.is_empty() {
+            continue;
+        }
+        for base in &bases {
+            let rel = format!("{base}{}", literal.join("/"));
+            let dir = root.join(&rel);
+            if validate::relative_path(&rel).is_ok() && !dir.exists() && fs::create_dir_all(&dir).is_ok() {
+                created.push(rel);
+            }
+        }
+    }
+    created
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputFile {
@@ -245,6 +282,8 @@ pub struct OutputReport {
     pub files: Vec<OutputFile>,
     /// Changes outside the allowlist (or deletions / links). Reported, never committed.
     pub unexpected: Vec<Change>,
+    /// Validation problems tolerated because `output.strict` is false; left for manual review.
+    pub warnings: Vec<String>,
 }
 
 /// Classifies the agent's changes and validates the publishable output.
@@ -262,6 +301,10 @@ pub fn collect_outputs(
 
     for change in changes {
         let is_link = after.files.get(&change.path).is_some_and(|s| s.symlink);
+        // Without a shell the agent can only create a folder by writing a file into it; such placeholders are noise.
+        if change.change == ChangeType::Added && !is_link && is_dir_placeholder(&change.path) {
+            continue;
+        }
         let allowed = change.change != ChangeType::Deleted
             && !is_link
             && validate::relative_path(&change.path).is_ok()
@@ -311,16 +354,29 @@ pub fn collect_outputs(
             bundle.primary_output().is_some_and(|p| after.files.contains_key(p) && before.files.contains_key(p));
         let message = if unchanged {
             format!("The agent did not change {expected}: the generated content is identical to the existing file, so there is nothing to publish.")
+        } else if unexpected.is_empty() {
+            format!(
+                "The agent finished without writing {expected}. It made no file changes at all in the repository; \
+                 its final message in the job log explains why it stopped."
+            )
         } else {
-            format!("The agent finished without writing {expected}.")
+            const SHOWN: usize = 20;
+            let mut listed: Vec<String> =
+                unexpected.iter().take(SHOWN).map(|c| format!("{} {}", c.change, c.path)).collect();
+            if unexpected.len() > SHOWN {
+                listed.push(format!("… and {} more", unexpected.len() - SHOWN));
+            }
+            format!(
+                "The agent finished without writing {expected}. It changed only files outside the allowed output paths, \
+                 which are never kept: {}.",
+                listed.join(", ")
+            )
         };
         return Err(AppError::new(ErrorCode::OutputMissing, message).retryable(false));
     }
-    let primary = match bundle.primary_output() {
-        Some(p) => files.iter().find(|f| f.path == p).map(|f| f.path.clone()).ok_or_else(|| {
-            AppError::new(ErrorCode::OutputMissing, format!("The agent did not write {p}.")).retryable(false)
-        })?,
-        None => files
+    let mut warnings = Vec::new();
+    let fallback_primary = || {
+        files
             .iter()
             .find(|f| {
                 let lower = f.path.to_ascii_lowercase();
@@ -328,20 +384,42 @@ pub fn collect_outputs(
             })
             .unwrap_or(&files[0])
             .path
-            .clone(),
+            .clone()
+    };
+    let primary = match bundle.primary_output() {
+        Some(p) => match files.iter().find(|f| f.path == p) {
+            Some(f) => f.path.clone(),
+            None if !out_cfg.strict => {
+                warnings.push(format!("The agent did not write {p}; review the other generated files."));
+                fallback_primary()
+            }
+            None => {
+                let message = format!("The agent did not write {p}.");
+                return Err(AppError::new(ErrorCode::OutputMissing, message).retryable(false));
+            }
+        },
+        None => fallback_primary(),
     };
     let primary_file = files.iter().find(|f| f.path == primary).expect("primary is in files");
     let meaningful = primary_file.new_content.trim().len() as u64;
-    if meaningful == 0 {
-        return Err(AppError::new(ErrorCode::OutputEmpty, format!("{primary} is empty.")));
+    let size_problem = if meaningful == 0 {
+        Some(format!("{primary} is empty."))
+    } else if meaningful < out_cfg.min_bytes {
+        Some(format!("{primary} is only {meaningful} bytes; at least {} were expected.", out_cfg.min_bytes))
+    } else {
+        None
+    };
+    if let Some(problem) = size_problem {
+        if out_cfg.strict {
+            return Err(AppError::new(ErrorCode::OutputEmpty, problem));
+        }
+        warnings.push(problem);
     }
-    if meaningful < out_cfg.min_bytes {
-        return Err(AppError::new(
-            ErrorCode::OutputEmpty,
-            format!("{primary} is only {meaningful} bytes; at least {} were expected.", out_cfg.min_bytes),
-        ));
-    }
-    Ok(OutputReport { primary, files, unexpected })
+    Ok(OutputReport { primary, files, unexpected, warnings })
+}
+
+fn is_dir_placeholder(path: &str) -> bool {
+    matches!(path.rsplit('/').next(), Some(".keep" | ".gitkeep"))
 }
 
 /// Paths of all regular files (used to describe the repository to the fake agent and in tests).
@@ -455,6 +533,9 @@ mod tests {
         fs::write(root.join("docs/old.md"), "new content\n").unwrap();
         fs::write(root.join("README.md"), "tampered").unwrap();
         fs::remove_file(root.join("delete-me.txt")).unwrap();
+        fs::create_dir_all(root.join("docs/adr")).unwrap();
+        fs::write(root.join("docs/adr/.keep"), "").unwrap();
+        fs::write(root.join(".gitkeep"), "").unwrap();
         std::os::unix::fs::symlink("/etc/passwd", root.join("docs/link.md")).unwrap();
         let after = snapshot(root).unwrap();
 
@@ -528,5 +609,66 @@ mod tests {
         fs::write(root.join("docs/a.md"), "# Alpha context document\n").unwrap();
         let after = snapshot(root).unwrap();
         assert_eq!(collect_outputs(&b, root, &before, &BTreeMap::new(), &after).unwrap().primary, "docs/a.md");
+    }
+
+    #[test]
+    fn prepares_literal_output_folders() {
+        let bdir = tempfile::tempdir().unwrap();
+        let manifest = "schema_version: 1\nagent: { id: bc }\nprompt: { template: x }\noutput:\n  paths: \
+                        [docs/BC-*.md, docs/archetypes/04-ADRs/*.md, \"**/docs/archetypes/*.md\", \"*.md\"]\n";
+        fs::create_dir_all(bdir.path().join("agents")).unwrap();
+        fs::write(bdir.path().join("bundle.yaml"), manifest).unwrap();
+        fs::write(bdir.path().join("agents/bc.agent.md"), "# a").unwrap();
+        let b = AgentBundle::load(bdir.path()).unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        fs::create_dir_all(root.join("svc")).unwrap();
+        let scopes = ["svc".to_owned(), "../escape".to_owned(), "missing".to_owned()];
+
+        let mut created = prepare_output_dirs(&b, root, &scopes);
+        created.sort();
+        assert_eq!(created, ["docs", "docs/archetypes/04-ADRs", "svc/docs", "svc/docs/archetypes/04-ADRs"]);
+        assert!(root.join("svc/docs/archetypes").is_dir());
+        assert!(!root.join("missing").exists());
+        assert!(snapshot(root).unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn missing_output_names_files_written_elsewhere() {
+        let bdir = tempfile::tempdir().unwrap();
+        let b = bundle(bdir.path(), false);
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        let before = snapshot(root).unwrap();
+        let err = collect_outputs(&b, root, &before, &BTreeMap::new(), &before).unwrap_err();
+        assert!(err.message.contains("no file changes at all"), "{}", err.message);
+
+        fs::create_dir_all(root.join("Docs")).unwrap();
+        fs::write(root.join("Docs/bc.md"), "# Bounded contexts\n").unwrap();
+        let after = snapshot(root).unwrap();
+        let err = collect_outputs(&b, root, &before, &BTreeMap::new(), &after).unwrap_err();
+        assert_eq!(err.code, ErrorCode::OutputMissing);
+        assert!(err.message.contains("added Docs/bc.md"), "{}", err.message);
+    }
+
+    #[test]
+    fn lenient_mode_keeps_output_for_review() {
+        let bdir = tempfile::tempdir().unwrap();
+        let mut b = bundle(bdir.path(), true);
+        b.manifest.output.strict = false;
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let before = snapshot(root).unwrap();
+
+        fs::write(root.join("docs/other.md"), "short\n").unwrap();
+        let after = snapshot(root).unwrap();
+        let report = collect_outputs(&b, root, &before, &BTreeMap::new(), &after).unwrap();
+        assert_eq!(report.primary, "docs/other.md");
+        assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+
+        // Nothing allowed was written: there is nothing to keep, so it still fails.
+        let err = collect_outputs(&b, root, &before, &BTreeMap::new(), &before).unwrap_err();
+        assert_eq!(err.code, ErrorCode::OutputMissing);
     }
 }

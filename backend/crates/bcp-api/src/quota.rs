@@ -43,7 +43,8 @@ fn summarize(v: &Value) -> Value {
     if !p.is_object() {
         return unavailable();
     }
-    let token_based = p["token_based_billing"].as_bool().or_else(|| v["token_based_billing"].as_bool()).unwrap_or(false);
+    let token_based =
+        p["token_based_billing"].as_bool().or_else(|| v["token_based_billing"].as_bool()).unwrap_or(false);
     let entitlement = p["entitlement"].as_f64();
     let remaining = p["quota_remaining"].as_f64().or_else(|| p["remaining"].as_f64());
     let used = p["credits_used"].as_f64().or(match (entitlement, remaining) {

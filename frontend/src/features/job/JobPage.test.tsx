@@ -18,6 +18,68 @@ beforeEach(() => {
 });
 
 describe('Job page', () => {
+  it('publishes to a custom central repository instead of the generator default', async () => {
+    serveJob(
+      f.succeededJob({
+        publish: { ...f.succeededJob().publish, central_available: true, central_repo: 'ATT-DP1/default-docs' },
+      }),
+    );
+    let body: unknown;
+    server.use(
+      http.post('/api/bounded-context/jobs/:id/pull-request', async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json(f.succeededJob(), { status: 202 });
+      }),
+    );
+    const { user } = renderApp(`/jobs/${f.JOB_ID}`);
+
+    await user.type(await screen.findByRole('textbox', { name: 'Pull request title' }), 'Docs');
+    await user.click(screen.getByRole('checkbox', { name: /Also create a pull request/ }));
+    const repo = screen.getByRole('textbox', { name: 'Central repository' });
+    expect(repo).toHaveValue('ATT-DP1/default-docs');
+
+    await user.clear(repo);
+    await user.type(repo, 'not a repo');
+    expect(screen.getByRole('button', { name: 'Create pull request' })).toBeDisabled();
+    expect(screen.getByText('Enter the repository as owner/repository.')).toBeInTheDocument();
+
+    await user.clear(repo);
+    await user.type(repo, 'ATT-DP5/team-docs');
+    await user.click(screen.getByRole('button', { name: 'Create pull request' }));
+    await waitFor(() =>
+      expect(body).toEqual({ title: 'Docs', publish_central: true, reviewers: [], central_repo: 'ATT-DP5/team-docs' }),
+    );
+  });
+
+  it('shows another user\u2019s job read-only to an administrator', async () => {
+    serveJob(
+      f.succeededJob({ viewer_is_owner: false, requested_by: 'someone_ATT', can_publish: false, can_retry: false }),
+    );
+    renderApp(`/jobs/${f.JOB_ID}`);
+
+    expect(await screen.findByText('Administrator view')).toBeInTheDocument();
+    expect(screen.getByText('someone_ATT', { selector: 'strong' })).toBeInTheDocument();
+    expect(screen.getByText('No pull request has been opened for this job yet.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create pull request' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'Download all (.zip)' }).length).toBeGreaterThan(0);
+  });
+
+  it('lets an administrator open the pull request on behalf of the requester', async () => {
+    serveJob(f.succeededJob({ viewer_is_owner: false, requested_by: 'someone_ATT', can_publish: true }));
+    let body: unknown;
+    server.use(
+      http.post('/api/bounded-context/jobs/:id/pull-request', async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json(f.succeededJob({ viewer_is_owner: false }), { status: 202 });
+      }),
+    );
+    const { user } = renderApp(`/jobs/${f.JOB_ID}`);
+
+    expect(await screen.findByText('Publishing on behalf of the requester')).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', { name: 'Pull request title' }), 'Docs');
+    await user.click(screen.getByRole('button', { name: 'Create pull request for someone_ATT' }));
+    await waitFor(() => expect(body).toEqual({ title: 'Docs', publish_central: false, reviewers: [] }));
+  });
   it('shows the generator and a link to the batch', async () => {
     serveJob(
       f.failedJob({
@@ -36,8 +98,8 @@ describe('Job page', () => {
     );
     renderApp(`/jobs/${f.JOB_ID}`);
 
-    expect(await screen.findByText('Generator')).toBeInTheDocument();
-    expect(screen.getByText('Team generator')).toBeInTheDocument();
+    expect(await screen.findByText('Team generator')).toHaveAttribute('title', 'acme/bc-gen');
+    expect(screen.getByText('(user)')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Batch' })).toHaveAttribute('href', `/batches/${f.BATCH_ID}`);
   });
 
@@ -48,6 +110,8 @@ describe('Job page', () => {
     const { user } = renderApp(`/jobs/${f.JOB_ID}`);
 
     const steps = await screen.findByRole('list', { name: 'Generation steps' });
+    // Logs are open by default, also for finished jobs.
+    expect(screen.getByRole('button', { name: /Logs/ })).toHaveAttribute('aria-expanded', 'true');
     const items = within(steps).getAllByRole('listitem');
     expect(items.map((li) => li.getAttribute('data-state'))).toEqual(['done', 'done', 'done', 'failed', 'skipped']);
     expect(within(items[3]).getByText('Running bounded-context agent')).toBeInTheDocument();
@@ -66,14 +130,16 @@ describe('Job page', () => {
 
   it('follows a running job over SSE and closes the stream when it finishes', async () => {
     serveJob(f.runningJob());
-    const { user } = renderApp(`/jobs/${f.JOB_ID}`);
+    renderApp(`/jobs/${f.JOB_ID}`);
     await screen.findByRole('list', { name: 'Generation steps' });
 
     const es = MockEventSource.latest();
     expect(es.url).toBe(`/api/bounded-context/jobs/${f.JOB_ID}/events`);
     expect(screen.getByText('Live')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /Logs/ }));
+    // Logs are open and streaming while the job runs.
+    expect(screen.getByRole('button', { name: /Logs/ })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Streaming')).toBeInTheDocument();
     act(() => {
       es.emit('open');
       es.emit('log', { seq: 41, ts: '2026-10-24T10:02:00Z', level: 'info', stage: 'running_agent', message: 'Reading src/orders' });
@@ -89,7 +155,15 @@ describe('Job page', () => {
   });
 
   it('shows preview, diff and never-committed changes, then publishes a pull request', async () => {
-    serveJob(f.succeededJob());
+    serveJob(
+      f.succeededJob({
+        publish: {
+          ...f.succeededJob().publish,
+          central_available: true,
+          central_repo: 'ATT-DP1/apm0014313-ragaflow-ai-context-docs',
+        },
+      }),
+    );
     const queued = f.succeededJob({
       can_publish: false,
       publish: {
@@ -109,7 +183,11 @@ describe('Job page', () => {
       http.post('/api/bounded-context/jobs/:id/pull-request', async ({ request }) => {
         publishCalls += 1;
         expect(request.headers.get('X-Requested-With')).toBe('bcp');
-        expect(await request.json()).toEqual({ title: 'APM-123: Update shop context', publish_central: true });
+        expect(await request.json()).toEqual({
+          title: 'APM-123: Update shop context',
+          publish_central: true,
+          reviewers: ['alice', 'bob'],
+        });
         return HttpResponse.json(queued, { status: 202 });
       }),
     );
@@ -122,7 +200,10 @@ describe('Job page', () => {
     await user.click(screen.getByRole('tab', { name: 'Diff' }));
     const table = screen.getByRole('table');
     expect(table.querySelectorAll('tr[data-kind="add"]')).toHaveLength(5);
-    expect(screen.getAllByRole('link', { name: /Download/ })[0]).toHaveAttribute(
+    for (const zip of screen.getAllByRole('link', { name: 'Download all (.zip)' })) {
+      expect(zip).toHaveAttribute('href', `/api/bounded-context/jobs/${f.JOB_ID}/archive`);
+    }
+    expect(screen.getByRole('link', { name: /^Download .*\.md$/ })).toHaveAttribute(
       'href',
       `/api/bounded-context/jobs/${f.JOB_ID}/output`,
     );
@@ -130,6 +211,7 @@ describe('Job page', () => {
     // Terminal + publish not started: no stream until publishing starts.
     expect(MockEventSource.instances).toHaveLength(0);
     await user.type(screen.getByRole('textbox', { name: 'Pull request title' }), 'APM-123: Update shop context');
+    await user.type(screen.getByRole('textbox', { name: /Reviewers/ }), 'alice, @bob');
     await user.click(screen.getByRole('checkbox', { name: /Also create a pull request/ }));
     await user.click(screen.getByRole('button', { name: 'Create pull request' }));
     await waitFor(() => expect(publishCalls).toBe(1));

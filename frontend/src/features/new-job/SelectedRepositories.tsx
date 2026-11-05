@@ -1,8 +1,11 @@
+import { useState } from 'react';
+
 import { useBranches, useRepository } from '../../api/queries';
 import { Alert } from '../../components/Alert';
 import { Button } from '../../components/Button';
 import { ErrorPanel } from '../../components/ErrorPanel';
 import { Spinner } from '../../components/Spinner';
+import { useDebouncedValue } from '../../lib/hooks';
 import { inputClass } from '../../lib/styles';
 import { MAX_BATCH_REPOS, repoKey, type SelectedRepo, type Selection } from './selection';
 
@@ -22,29 +25,50 @@ function SelectedRow({
   const key = repoKey(owner, repo);
   const detail = useRepository(owner, repo);
   // Branches load lazily, once the repository is part of the selection.
-  const branches = useBranches(owner, repo, '', 1);
+  const [branchQuery, setBranchQuery] = useState('');
+  const q = useDebouncedValue(branchQuery.trim(), 300);
+  const branches = useBranches(owner, repo, q, 1);
   const names = branches.data?.items.map((b) => b.name) ?? [];
   const options = branch && !names.includes(branch) ? [branch, ...names] : names;
   const defaultBranch = entry.defaultBranch ?? detail.data?.default_branch ?? branches.data?.default_branch ?? null;
   const selectId = `branch-${key}`;
+  const showFilter = Boolean(q) || Boolean(branches.data?.has_more);
+  const searchingBranches = branchQuery.trim() !== q || branches.isPlaceholderData;
 
   return (
     <li className="space-y-2 px-3 py-3">
       <div className="flex flex-wrap items-center gap-3">
         <span className="min-w-0 flex-1 truncate font-medium">{key}</span>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {showFilter && (
+            <input
+              type="search"
+              aria-label={`Search branches of ${key}`}
+              placeholder="Search branches"
+              value={branchQuery}
+              onChange={(e) => setBranchQuery(e.target.value)}
+              maxLength={100}
+              autoComplete="off"
+              spellCheck={false}
+              className={`${inputClass} w-40 text-xs`}
+            />
+          )}
+          {searchingBranches && <Spinner size="sm" label="Searching…" />}
           <span className="text-sm" aria-hidden="true">
             Branch
           </span>
           <select
             id={selectId}
             aria-label={`Base branch for ${key}`}
+            aria-busy={searchingBranches}
             className={`${inputClass} w-48 font-mono text-xs`}
             value={branch ?? ''}
             disabled={options.length === 0}
             onChange={(e) => onBranchChange(e.target.value)}
           >
-            {options.length === 0 && <option value="">Loading…</option>}
+            {options.length === 0 && (
+              <option value="">{branches.isPending ? 'Loading…' : branches.isError ? 'Unavailable' : 'No branches'}</option>
+            )}
             {options.map((name) => (
               <option key={name} value={name}>
                 {name}
@@ -59,7 +83,13 @@ function SelectedRow({
       </div>
       {branches.isError && <ErrorPanel error={branches.error} title={`Could not load branches of ${key}`} />}
       {branches.data?.has_more && (
-        <p className="text-xs text-gray-500 dark:text-gray-400">Showing the first {branches.data.items.length} branches.</p>
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          Showing the first {branches.data.items.length}
+          {branches.data.total !== undefined ? ` of ${branches.data.total}` : ''} branches. Search to find others.
+        </p>
+      )}
+      {q && !searchingBranches && branches.data && branches.data.items.length === 0 && (
+        <p className="text-xs text-gray-500 dark:text-gray-400">No branch matches “{q}”.</p>
       )}
       <div aria-live="polite" className="space-y-2">
         {detail.isPending && <Spinner size="sm" label={`Checking access to ${key}…`} />}

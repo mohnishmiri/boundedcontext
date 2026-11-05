@@ -1,3 +1,5 @@
+import type { CSSProperties } from 'react';
+
 import type { Step, StepState } from '../api/types';
 import { formatDuration, formatTime } from '../lib/format';
 
@@ -53,8 +55,63 @@ function timing(step: Step): string {
   return '';
 }
 
-export function StepList({ steps, label }: { steps: Step[]; label: string }) {
+export function StepList({
+  steps,
+  label,
+  orientation = 'vertical',
+}: {
+  steps: Step[];
+  label: string;
+  orientation?: 'vertical' | 'horizontal';
+}) {
   if (steps.length === 0) return null;
+  if (orientation === 'horizontal') {
+    return (
+      <ol
+        aria-label={label}
+        className="grid grid-cols-1 gap-4 sm:[grid-template-columns:repeat(var(--steps),minmax(0,1fr))]"
+        style={{ '--steps': steps.length } as CSSProperties}
+      >
+        {steps.map((step, i) => {
+          const t = timing(step);
+          const connector =
+            step.state === 'done' ? 'bg-green-600' : step.state === 'failed' ? 'bg-red-300' : 'bg-gray-200 dark:bg-gray-700';
+          return (
+            <li
+              key={step.key}
+              className="flex min-w-0 flex-col gap-2"
+              aria-current={step.state === 'active' ? 'step' : undefined}
+              data-state={step.state}
+            >
+              <div className="flex items-center">
+                <StepIcon state={step.state} />
+                {i < steps.length - 1 && (
+                  <span className={`ml-2 hidden h-0.5 flex-1 rounded sm:block ${connector}`} aria-hidden="true" />
+                )}
+              </div>
+              <div className="min-w-0 pr-2">
+                <p
+                  className={
+                    step.state === 'pending' || step.state === 'skipped'
+                      ? 'text-sm text-gray-500 dark:text-gray-400'
+                      : step.state === 'failed'
+                        ? 'text-sm font-medium text-red-700 dark:text-red-300'
+                        : 'text-sm font-medium text-gray-900 dark:text-gray-100'
+                  }
+                >
+                  {step.label}
+                </p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {stateText[step.state]}
+                  {t && ` · ${t}`}
+                </p>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    );
+  }
   return (
     <ol aria-label={label} className="space-y-3">
       {steps.map((step) => {

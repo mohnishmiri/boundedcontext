@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use bcp_core::config::{env_bool, env_opt, env_or, env_parse, CommonConfig};
+use bcp_core::config::{admin_logins_from_env, env_bool, env_opt, env_or, env_parse, CommonConfig};
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -29,6 +29,8 @@ pub struct ApiConfig {
     pub batch_max_repos: usize,
     /// The worker runs every job with one shared Copilot token instead of the requester's.
     pub copilot_shared_token: bool,
+    /// GitHub logins (lower case) with read access to every user's jobs (`BCP_ADMIN_LOGINS`).
+    pub admin_logins: Vec<String>,
 }
 
 impl ApiConfig {
@@ -60,7 +62,12 @@ impl ApiConfig {
             copilot_integration_id: env_or("BCP_COPILOT_INTEGRATION_ID", "copilot-developer-cli"),
             batch_max_repos: env_parse("BCP_BATCH_MAX_REPOS", 25)?,
             copilot_shared_token: env_bool("BCP_COPILOT_SHARED_TOKEN", false)?,
+            admin_logins: admin_logins_from_env()?,
         })
+    }
+
+    pub fn is_admin(&self, login: &str) -> bool {
+        self.admin_logins.iter().any(|a| a.eq_ignore_ascii_case(login))
     }
 
     /// OAuth callback registered on the GitHub App.

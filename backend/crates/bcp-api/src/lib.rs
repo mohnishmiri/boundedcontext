@@ -15,6 +15,7 @@ pub mod quota;
 pub mod sse;
 pub mod state;
 pub mod view;
+mod zip;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,6 +69,7 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{id}/logs", get(jobs::logs))
         .route("/jobs/{id}/diff", get(jobs::diff))
         .route("/jobs/{id}/output", get(jobs::output))
+        .route("/jobs/{id}/archive", get(jobs::archive))
         .route("/jobs/{id}/pull-request", post(jobs::publish))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/retry", post(jobs::retry))
@@ -88,10 +90,7 @@ pub fn router(state: AppState) -> Router {
         .route("/agent", get(github_routes::agent))
         .route("/models", get(models::list))
         .route("/copilot/quota", get(quota::quota))
-        .route(
-            "/copilot/token",
-            get(copilot_token::status).post(copilot_token::save).delete(copilot_token::remove),
-        )
+        .route("/copilot/token", get(copilot_token::status).post(copilot_token::save).delete(copilot_token::remove))
         .route("/generators", get(generators::list).post(generators::add))
         .route("/generators/{id}", axum::routing::delete(generators::remove))
         .route("/generators/{id}/agent", get(generators::agent_info))
@@ -125,6 +124,14 @@ pub async fn build_state(cfg: ApiConfig) -> anyhow::Result<AppState> {
     let bundle = Arc::new(AgentBundle::load(&cfg.common.agent_bundle_dir).context("loading agent bundle")?);
     let catalog = ModelCatalog::load(&cfg.common.models_file, cfg.common.models_show_unverified)?;
     let registry = GeneratorRegistry::load(&cfg.generators_file)?;
+    let mut bundled = std::collections::HashMap::new();
+    for g in registry.bundled() {
+        let dir = cfg.common.generators_dir.join(&g.dir);
+        let b = AgentBundle::load(&dir)
+            .with_context(|| format!("loading bundled generator {} from {}", g.id, dir.display()))?;
+        tracing::info!(generator = %g.id, agent = b.id(), version = %b.version, "bundled generator loaded");
+        bundled.insert(g.id.clone(), Arc::new(b));
+    }
     let copilot_models = match &cfg.copilot_api_url {
         Some(url) => Some(copilot_models::CopilotModelsClient::new(url, &cfg.copilot_integration_id)?),
         None => None,
@@ -133,7 +140,7 @@ pub async fn build_state(cfg: ApiConfig) -> anyhow::Result<AppState> {
         tracing::warn!("the agent bundle is a PLACEHOLDER — install the real agent (agent-bundle/README.md)");
     }
     tracing::info!(agent = bundle.id(), version = %bundle.version, locked_model = ?bundle.locked_model(), "agent bundle loaded");
-    Ok(AppState::new(cfg, store, github, bundle, catalog, registry, copilot_models))
+    Ok(AppState::new(cfg, store, github, bundle, catalog, registry, bundled, copilot_models))
 }
 
 pub async fn serve(cfg: ApiConfig) -> anyhow::Result<()> {

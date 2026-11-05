@@ -87,29 +87,29 @@ pub async fn model_list(state: &AppState, user_id: Uuid, token: &str) -> Arc<Mod
                 Err(_) => None,
             };
             match client.list(token, account_base.as_ref()).await {
-            Ok(live) => {
-                let mut items: Vec<ModelEntry> = Vec::with_capacity(live.len() + 1);
-                // `auto` (Copilot picks) is a Copilot CLI feature, not a listed model.
-                if let Some(auto) = catalog.get("auto") {
-                    items.push(auto.clone());
+                Ok(live) => {
+                    let mut items: Vec<ModelEntry> = Vec::with_capacity(live.len() + 1);
+                    // `auto` (Copilot picks) is a Copilot CLI feature, not a listed model.
+                    if let Some(auto) = catalog.get("auto") {
+                        items.push(auto.clone());
+                    }
+                    items.extend(live.into_iter().filter(|m| m.id != "auto"));
+                    let default_model = if items.iter().any(|m| m.id == catalog.default_model()) {
+                        catalog.default_model().to_owned()
+                    } else {
+                        items.first().map(|m| m.id.clone()).unwrap_or_else(|| "auto".to_owned())
+                    };
+                    ModelList { items, source: ModelSource::Copilot, warning: None, default_model }
                 }
-                items.extend(live.into_iter().filter(|m| m.id != "auto"));
-                let default_model = if items.iter().any(|m| m.id == catalog.default_model()) {
-                    catalog.default_model().to_owned()
-                } else {
-                    items.first().map(|m| m.id.clone()).unwrap_or_else(|| "auto".to_owned())
-                };
-                ModelList { items, source: ModelSource::Copilot, warning: None, default_model }
-            }
-            Err(e) => {
-                tracing::warn!(%user_id, error = %e, endpoint = ?account_base.as_ref().map(Url::as_str), "live Copilot model list unavailable; using the catalog");
-                metrics::counter!("bcp_model_list_fallback_total").increment(1);
-                catalog_list(Some(
-                    "Could not load the models available to your GitHub Copilot account, so this is the portal's \
+                Err(e) => {
+                    tracing::warn!(%user_id, error = %e, endpoint = ?account_base.as_ref().map(Url::as_str), "live Copilot model list unavailable; using the catalog");
+                    metrics::counter!("bcp_model_list_fallback_total").increment(1);
+                    catalog_list(Some(
+                        "Could not load the models available to your GitHub Copilot account, so this is the portal's \
                      standard list. Availability is still checked by GitHub Copilot when the job runs."
-                        .to_owned(),
-                ))
-            }
+                            .to_owned(),
+                    ))
+                }
             }
         }
     };

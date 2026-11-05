@@ -53,6 +53,8 @@ spec:
           env:
             - name: API_UPSTREAM
               value: {{ default (printf "http://%s-api:8080" (include "bcp.fullname" .)) $f.apiUpstream | quote }}
+            - name: CSP_IMG_SRC
+              value: {{ $f.cspImgSrc | quote }}
           ports:
             - name: http
               containerPort: 8080

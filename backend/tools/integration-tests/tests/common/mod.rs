@@ -56,8 +56,11 @@ case "$mode" in unexpected*) echo "tampered" > README.md ;; esac
 echo "done"
 "#;
 
-/// Test registry: two curated generators from the mock's `genhub` repositories; users may add `genhub/*`.
+/// Test registry: the vendored OMNI bundle baked in from generators/, two curated generators from the mock's
+/// `genhub` repositories; users may add `genhub/*`.
 const GENERATORS_YAML: &str = r#"
+bundled:
+  - { id: omni, dir: omni-readme }
 curated:
   - { id: lite, name: Lite (curated), description: A minimal generator, owner: genhub, repo: lite }
   - { id: ctx, name: Context analysis, owner: genhub, repo: monorepo, path: generators/ctx }
@@ -145,6 +148,7 @@ impl Harness {
             },
             cipher: TokenCipher::from_base64(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])).unwrap(),
             agent_bundle_dir: repo_root().join("backend/tools/integration-tests/fixtures/bundle"),
+            generators_dir: repo_root().join("generators"),
             models_file: repo_root().join("config/models.yaml"),
             models_show_unverified: false,
             central_repository: Some(("ATT-DP1".into(), "apm0014313-ragaflow-ai-context-docs".into())),
@@ -165,6 +169,7 @@ impl Harness {
             copilot_integration_id: "copilot-developer-cli".into(),
             batch_max_repos: 25,
             copilot_shared_token: false,
+            admin_logins: vec!["admin".into()],
         };
         let state = bcp_api::build_state(cfg).await.unwrap();
         let store = state.store.clone();
@@ -206,6 +211,7 @@ impl Harness {
             shutdown_grace: Duration::from_secs(5),
             idle_exit: Duration::from_secs(1),
             max_log_lines: 1000,
+            smtp: None,
         };
         tweak(&mut cfg);
         let bundle = Arc::new(AgentBundle::load(&self.common.agent_bundle_dir).unwrap());

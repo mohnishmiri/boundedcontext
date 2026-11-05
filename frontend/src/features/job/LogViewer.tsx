@@ -10,10 +10,11 @@ const levelStyles: Record<LogLevel, string> = {
   error: 'text-red-700 dark:text-red-300',
 };
 
-export function LogViewer({ logs, autoOpen }: { logs: LogEntry[]; autoOpen: boolean }) {
+export function LogViewer({ logs, autoOpen, live = false }: { logs: LogEntry[]; autoOpen: boolean; live?: boolean }) {
   const [open, setOpen] = useState(autoOpen);
   const scroller = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  const [following, setFollowing] = useState(true);
 
   useEffect(() => {
     if (autoOpen) setOpen(true);
@@ -26,25 +27,49 @@ export function LogViewer({ logs, autoOpen }: { logs: LogEntry[]; autoOpen: bool
 
   return (
     <section aria-labelledby="logs-heading" className="space-y-2">
-      <h2 id="logs-heading" className="text-base font-semibold">
-        <button
-          type="button"
-          className="inline-flex items-center gap-2 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500"
-          aria-expanded={open}
-          aria-controls="job-logs"
-          onClick={() => setOpen((o) => !o)}
-        >
-          <svg
-            viewBox="0 0 20 20"
-            className={`h-4 w-4 transition-transform ${open ? 'rotate-90' : ''}`}
-            fill="currentColor"
-            aria-hidden="true"
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 id="logs-heading" className="text-base font-semibold">
+          <button
+            type="button"
+            className="inline-flex items-center gap-2 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500"
+            aria-expanded={open}
+            aria-controls="job-logs"
+            onClick={() => setOpen((o) => !o)}
           >
-            <path d="M7 5l6 5-6 5z" />
-          </svg>
-          Logs <span className="text-sm font-normal text-gray-500">({logs.length})</span>
-        </button>
-      </h2>
+            <svg
+              viewBox="0 0 20 20"
+              className={`h-4 w-4 transition-transform ${open ? 'rotate-90' : ''}`}
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M7 5l6 5-6 5z" />
+            </svg>
+            Logs <span className="text-sm font-normal text-gray-500">({logs.length})</span>
+          </button>
+        </h2>
+        {live && open && (
+          <div className="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" aria-hidden="true" />
+              Streaming
+            </span>
+            {!following && (
+              <button
+                type="button"
+                className="font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                onClick={() => {
+                  stickToBottom.current = true;
+                  setFollowing(true);
+                  const el = scroller.current;
+                  if (el) el.scrollTop = el.scrollHeight;
+                }}
+              >
+                Jump to latest
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       {open && (
         <div
           id="job-logs"
@@ -55,8 +80,9 @@ export function LogViewer({ logs, autoOpen }: { logs: LogEntry[]; autoOpen: bool
           onScroll={(e) => {
             const el = e.currentTarget;
             stickToBottom.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 16;
+            setFollowing(stickToBottom.current);
           }}
-          className="max-h-96 overflow-auto rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs leading-5 dark:border-gray-700 dark:bg-gray-950"
+          className="max-h-[32rem] overflow-auto rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs leading-5 dark:border-gray-700 dark:bg-gray-950"
         >
           {logs.length === 0 ? (
             <p className="text-gray-500">No log output yet.</p>

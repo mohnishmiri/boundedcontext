@@ -30,6 +30,10 @@ if [ -t 1 ]; then GREEN=$'\033[32m'; DIM=$'\033[2m'; RESET=$'\033[0m'; else GREE
 command -v docker >/dev/null 2>&1 || { echo "Docker is not installed." >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "Docker is not running; nothing to stop." >&2; exit 0; }
 
+# Include the optional local database so it is stopped (and wiped with --wipe) too. An external database
+# (BCP_EXTERNAL_DATABASE_URL) is never touched.
+export COMPOSE_PROFILES=local-db
+
 if [ -z "$(docker compose ps -a -q 2>/dev/null)" ] && [ "$WIPE" = 0 ]; then
   echo "The stack is not running."
   exit 0

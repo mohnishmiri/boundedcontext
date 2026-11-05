@@ -128,7 +128,7 @@ impl GitHubSettings {
         };
 
         let oauth_url = match env_opt("BCP_GITHUB_OAUTH_URL") {
-            Some(v) if !(!use_mock && v == "http://mock-github:9000") => parse_url("BCP_GITHUB_OAUTH_URL", &v)?,
+            Some(v) if use_mock || v != "http://mock-github:9000" => parse_url("BCP_GITHUB_OAUTH_URL", &v)?,
             _ => web_url.clone(),
         };
 
@@ -160,6 +160,8 @@ pub struct CommonConfig {
     pub github: GitHubSettings,
     pub cipher: TokenCipher,
     pub agent_bundle_dir: PathBuf,
+    /// Root of the bundled generators baked into the images (`bundled[].dir` in the generator registry).
+    pub generators_dir: PathBuf,
     pub models_file: PathBuf,
     pub models_show_unverified: bool,
     pub central_repository: Option<(String, String)>,
@@ -188,6 +190,7 @@ impl CommonConfig {
             github: GitHubSettings::from_env()?,
             cipher,
             agent_bundle_dir: env_or("BCP_AGENT_BUNDLE_DIR", "/opt/agent-bundle").into(),
+            generators_dir: env_or("BCP_GENERATORS_DIR", "/opt/generators").into(),
             models_file: env_or("BCP_MODELS_FILE", "/etc/bcp/models.yaml").into(),
             models_show_unverified: env_bool("BCP_MODELS_SHOW_UNVERIFIED", false)?,
             central_repository,
@@ -207,9 +210,31 @@ pub fn log_format() -> LogFormat {
     }
 }
 
+/// `BCP_ADMIN_LOGINS`: GitHub logins (lower case) of the portal administrators.
+pub fn admin_logins_from_env() -> Result<Vec<String>> {
+    parse_admin_logins(&env_or("BCP_ADMIN_LOGINS", ""))
+}
+
+/// `alice, bob_ATT` -> `["alice", "bob_att"]`; rejects anything that is not a GitHub login.
+pub fn parse_admin_logins(raw: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for login in raw.split([',', ';', ' ']).map(str::trim).filter(|s| !s.is_empty()) {
+        crate::validate::user_login(login).map_err(|e| anyhow::anyhow!("BCP_ADMIN_LOGINS: {login:?}: {e}"))?;
+        out.push(login.to_ascii_lowercase());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_logins() {
+        assert_eq!(parse_admin_logins(" mz7819_ATT, octocat ;").unwrap(), ["mz7819_att", "octocat"]);
+        assert!(parse_admin_logins("").unwrap().is_empty());
+        assert!(parse_admin_logins("bad/login").is_err());
+    }
 
     #[test]
     fn secret_from_file() {

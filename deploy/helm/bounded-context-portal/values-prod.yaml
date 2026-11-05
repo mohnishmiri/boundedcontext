@@ -1,31 +1,59 @@
-# Production. Pod-per-agent-run isolation (KEDA ScaledJob), HA api/frontend, hostname egress filtering.
-# The release pipeline sets image tags to the git SHA; prefer pinning digests (api.image.digest=sha256:...).
+# Production: https://ragaflow-boundedcontext.web.att.com  (promote the image tags verified in values-perf.yaml)
+# Pod-per-agent-run isolation (KEDA ScaledJob) and HA api/frontend.
+#
+# Values marked REQUIRED are specific to the target subscription/cluster. They are deliberately empty so
+# `helm upgrade` stops with a clear message instead of deploying placeholders. Pass them with --set or a private
+# values file (they are identifiers, not secrets). Set image tags per release (--set api.image.tag=... etc.).
 
 global:
-  imageRegistry: bcpacr.azurecr.io          # <shared ACR>
+  # JFrog: pushed to artifact.it.att.com/<path> (no port), pulled through the :22609 docker endpoint.
+  imageRegistry: artifact.it.att.com:22609/apm0014313-dkr-attcc-stage/com.att.attcc
+  # kubectl -n bounded-context create secret docker-registry regcred --docker-server=artifact.it.att.com:22609 ...
+  imagePullSecrets:
+    - name: regcred
+
+image:
+  pullPolicy: IfNotPresent
 
 config:
-  publicUrl: https://bcp.example.com
+  publicUrl: https://ragaflow-boundedcontext.web.att.com
+  databaseMaxConnections: 10
   github:
-    appId: "000002"                         # <production GitHub App id>
-    appSlug: bounded-context-portal
-    clientId: Iv23liPRODEXAMPLE
+    apiUrl: https://api.github.com
+    webUrl: https://github.com
+    # Same as the current .env: users sign in with a personal access token (no OAuth App / GitHub App).
+    # Set clientId (and Key Vault github-client-secret) to enable OAuth sign-in; the OAuth App callback URL is
+    # https://ragaflow-boundedcontext.web.att.com/api/auth/github/callback.
+    appId: ""
+    appSlug: RagaFlow-Bounded-Context
+    clientId: ""
   rustLog: "info,sqlx=warn"
   modelsShowUnverified: false
+  adminLogins:
+    - mz7819_ATT
+  extraEnv:
+    BCP_CENTRAL_REPO: ATT-DP1/apm0014313-ragaflow-ai-context-docs
   otel:
     endpoint: ""                            # e.g. http://otel-collector.monitoring:4317
+  # Completion emails. The password is Key Vault secret smtp-password (az keyvault secret set --name smtp-password ...).
+  smtp:
+    host: mta01.az.3pc.att.com
+    port: 19828
+    user: m55663-ap@mta01.att-mail.com
+    fromAddress: m55663-ap@mta01.att-mail.com
+    useTls: true
+    fallbackDomain: att.com
 
 secrets:
-  mode: csi
+  # akv2k8s syncs the Key Vault secrets into Kubernetes Secrets (no pod identity needed).
+  mode: akv2k8s
+  # Every job uses the requester's own Copilot token and credits.
+  copilotSharedToken: false
   keyVault:
-    name: kv-bcp-prod
-    tenantId: 00000000-0000-0000-0000-000000000000
+    name: ""                                # REQUIRED: Prod Key Vault holding database-url and token-encryption-key
 
-serviceAccounts:
-  api:
-    clientId: 55555555-5555-5555-5555-555555555555      # id-bcp-api-prod
-  worker:
-    clientId: 66666666-6666-6666-6666-666666666666      # id-bcp-worker-prod
+workloadIdentity:
+  podLabel: false
 
 api:
   autoscaling: { enabled: true, minReplicas: 3, maxReplicas: 8, targetCPUUtilizationPercentage: 65 }
@@ -33,6 +61,13 @@ api:
   resources:
     requests: { cpu: 200m, memory: 192Mi }
     limits: { cpu: "1", memory: 512Mi }
+  env:
+    BCP_SESSION_TTL_HOURS: "12"
+    BCP_COOKIE_SECURE: "true"
+    BCP_RATE_LIMIT_PER_MINUTE: "120"
+    BCP_JOB_CREATE_LIMIT_PER_HOUR: "20"
+    BCP_RUN_MIGRATIONS: "false"             # the pre-install/pre-upgrade hook migrates
+    BCP_JOB_RETENTION_DAYS: "90"
 
 worker:
   mode: once
@@ -41,16 +76,20 @@ worker:
     activeDeadlineSeconds: 18600
   env:
     BCP_MAX_JOB_TIMEOUT_SECS: "18000"
-    BCP_MAX_REPO_BYTES: "524288000"
-    BCP_MAX_REPO_FILES: "100000"
+    # Large monorepos unpack to more than 500 MiB; keep workDir.sizeLimit and ephemeral-storage above ~2x this.
+    BCP_MAX_REPO_BYTES: "2147483648"
+    BCP_MAX_REPO_FILES: "300000"
     BCP_TASK_LEASE_SECS: "60"
     BCP_GENERATE_MAX_ATTEMPTS: "2"
     BCP_PUBLISH_MAX_ATTEMPTS: "5"
     BCP_SHUTDOWN_GRACE_SECS: "60"
     BCP_IDLE_EXIT_SECS: "60"
+    BCP_MAX_LOG_LINES: "5000"
+  workDir:
+    sizeLimit: 10Gi
   resources:
-    requests: { cpu: "1", memory: 2Gi, ephemeral-storage: 2Gi }
-    limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 6Gi }
+    requests: { cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi }
+    limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 14Gi }
 
 frontend:
   autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 6, targetCPUUtilizationPercentage: 70 }
@@ -63,16 +102,22 @@ metrics:
     enabled: true
 
 ingress:
-  host: bcp.example.com
+  host: ragaflow-boundedcontext.web.att.com
   tls:
     enabled: true
-    keyVaultCertUri: https://kv-bcp-prod.vault.azure.net/certificates/bcp-tls
+    # REQUIRED (one of): Key Vault certificate name synced by akv2k8s, Key Vault certificate id for the app
+    # routing add-on, or an existing TLS secret in the namespace.
+    akv2k8sCertName: ""
+    keyVaultCertUri: ""
+    secretName: ""
 
 networkPolicy:
   enabled: true
   postgres:
-    cidrs: ["10.40.16.0/24"]
-  # Requires Azure CNI powered by Cilium + Advanced Container Networking Services (docs/azure-setup.md §4).
-  # Verify copilotFqdnPatterns against GitHub's Copilot allowlist reference before enabling.
+    # REQUIRED: prod PostgreSQL address(es), e.g. ["<ip>/32"] (public access) or its delegated subnet (private
+    # access). Do not reuse the perf DB (attcc-eastus2-prf1-db-psqlfs, 135.170.109.97).
+    cidrs: []
+  # Hostname-based egress needs Azure CNI powered by Cilium + Advanced Container Networking Services; enable
+  # once the cluster has them (verify copilotFqdnPatterns first). Plain NetworkPolicies still apply meanwhile.
   cilium:
-    enabled: true
+    enabled: false

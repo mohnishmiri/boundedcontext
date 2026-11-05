@@ -1,0 +1,17 @@
+# Prod cluster identifiers (not secrets). Fill in, then pass after values-prod.yaml:
+#   helm upgrade --install bcp . -n bounded-context -f values-prod.yaml -f values-prod.local.yaml ...
+
+secrets:
+  keyVault:
+    name: ""                    # Prod Key Vault holding database-url and token-encryption-key
+
+ingress:
+  tls:
+    # Exactly one of: Key Vault certificate name (synced by akv2k8s), certificate id (app routing add-on), or a TLS secret.
+    akv2k8sCertName: ""         # e.g. ragaflow-boundedcontext
+    keyVaultCertUri: ""         # e.g. https://<kv>.vault.azure.net/certificates/ragaflow-boundedcontext
+    secretName: ""              # e.g. ragaflow-tls
+
+networkPolicy:
+  postgres:
+    cidrs: []                   # prod PostgreSQL server IP, e.g. ["10.1.2.3/32"]

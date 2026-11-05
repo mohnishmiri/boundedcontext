@@ -18,22 +18,28 @@ use uuid::Uuid;
 
 use crate::auth::CurrentUser;
 use crate::error::ApiResult;
-use crate::jobs::job_json;
+use crate::jobs::{job_json_as, readable_job};
 use crate::state::AppState;
 
-const POLL_EVERY: Duration = Duration::from_secs(5);
+const POLL_EVERY: Duration = Duration::from_secs(3);
 const PING_EVERY: Duration = Duration::from_secs(15);
 const LOG_BATCH: i64 = 500;
 
 pub async fn events(State(state): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> ApiResult<Response> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError::not_found("Job"))?;
-    let job = state.store.get_user_job(user.user.id, id).await?;
+    let job = readable_job(&state, &user, id).await?;
+    let owner_view = job.user_id == user.user.id;
     // Subscribe before taking the snapshot so no change between the two is missed.
     let rx = state.job_events.subscribe();
     let start_seq = state.store.tail_events(id, 1).await?.last().map(|e| e.seq).unwrap_or(0);
-    let first = job_json(&state, &job).await?;
+    let first = Snapshot {
+        json: job_json_as(&state, &job, owner_view).await?,
+        updated_at: job.updated_at,
+        settled: job.is_settled(),
+        owner_view,
+    };
     metrics::gauge!("bcp_sse_streams").increment(1.0);
-    let stream = event_stream(state, id, rx, first, job.updated_at, start_seq, job.is_settled());
+    let stream = event_stream(state, id, rx, first, start_seq);
     let mut resp = Sse::new(stream).into_response();
     let h = resp.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
@@ -49,18 +55,26 @@ impl Drop for StreamGuard {
     }
 }
 
+/// The first `job` event and what the stream needs to know about it.
+struct Snapshot {
+    json: serde_json::Value,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    settled: bool,
+    /// `false` for administrators following another user's job (read-only snapshots).
+    owner_view: bool,
+}
+
 fn event_stream(
     state: AppState,
     id: Uuid,
     mut rx: tokio::sync::broadcast::Receiver<Uuid>,
-    first: serde_json::Value,
-    mut last_updated: chrono::DateTime<chrono::Utc>,
+    first: Snapshot,
     mut last_seq: i64,
-    settled: bool,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
         let _guard = StreamGuard;
-        yield Ok(Event::default().event("job").json_data(&first).unwrap_or_default());
+        let Snapshot { json, updated_at: mut last_updated, settled, owner_view } = first;
+        yield Ok(Event::default().event("job").json_data(&json).unwrap_or_default());
         if settled {
             return;
         }
@@ -104,7 +118,7 @@ fn event_stream(
                 Ok(Some(job)) => {
                     if job.updated_at != last_updated {
                         last_updated = job.updated_at;
-                        if let Ok(v) = job_json(&state, &job).await {
+                        if let Ok(v) = job_json_as(&state, &job, owner_view).await {
                             yield Ok(Event::default().event("job").json_data(&v).unwrap_or_default());
                         }
                     }

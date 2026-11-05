@@ -68,7 +68,9 @@ impl TokenService {
         match self.cipher.decrypt_string(&enc, &copilot_aad(user_id)) {
             Ok(t) => Ok(Some(t)),
             Err(_) => {
-                tracing::error!(%user_id, "stored Copilot token could not be decrypted (key rotated?)");
+                // Encrypted with a different BCP_TOKEN_ENCRYPTION_KEY: unusable, so drop it and ask the user again.
+                tracing::warn!(%user_id, "stored Copilot token could not be decrypted (key changed?); removing it");
+                self.store.delete_copilot_token(user_id).await?;
                 Ok(None)
             }
         }

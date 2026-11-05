@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use bcp_agent::Secret;
-use bcp_core::config::{env_opt, env_or, env_parse, env_secret, CommonConfig};
+use bcp_core::config::{admin_logins_from_env, env_bool, env_opt, env_or, env_parse, env_secret, CommonConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -35,6 +35,52 @@ pub struct WorkerConfig {
     pub shutdown_grace: Duration,
     pub idle_exit: Duration,
     pub max_log_lines: i64,
+    /// Completion emails to the requester; `None` disables them.
+    pub smtp: Option<SmtpConfig>,
+}
+
+/// Outgoing mail server for completion emails (`SMTP_*`).
+#[derive(Debug, Clone)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<Secret>,
+    pub from_address: String,
+    pub from_name: String,
+    /// STARTTLS on most ports, implicit TLS on 465; `false` sends in clear text (local test servers only).
+    pub use_tls: bool,
+    /// When GitHub exposes no email for the requester, mail `<login>@<domain>` (enterprise `_shortcode` removed).
+    pub fallback_domain: Option<String>,
+    /// Portal administrators (`BCP_ADMIN_LOGINS`), copied on every completion email.
+    pub cc_admin_logins: Vec<String>,
+}
+
+impl SmtpConfig {
+    /// Reads `SMTP_*`. Unset `SMTP_HOST` disables notifications; so does a user without a password (logged).
+    pub fn from_env() -> Result<Option<Self>> {
+        let Some(host) = env_opt("SMTP_HOST") else { return Ok(None) };
+        let username = env_opt("SMTP_USER");
+        let password = env_secret("SMTP_PASSWORD")?.map(Secret::new);
+        if username.is_some() && password.is_none() {
+            tracing::warn!("SMTP_USER is set but SMTP_PASSWORD(_FILE) is not; completion emails are disabled");
+            return Ok(None);
+        }
+        let Some(from_address) = env_opt("SMTP_FROM_ADDRESS").or_else(|| username.clone()) else {
+            bail!("SMTP_FROM_ADDRESS is required when SMTP_HOST is set");
+        };
+        Ok(Some(Self {
+            host,
+            port: env_parse("SMTP_PORT", 587)?,
+            username,
+            password,
+            from_address,
+            from_name: env_or("SMTP_FROM_NAME", "AT&T Bounded Context Portal"),
+            use_tls: env_bool("SMTP_USE_TLS", true)?,
+            fallback_domain: env_opt("BCP_NOTIFY_EMAIL_DOMAIN").map(|d| d.trim_start_matches('@').to_owned()),
+            cc_admin_logins: admin_logins_from_env()?,
+        }))
+    }
 }
 
 impl WorkerConfig {
@@ -69,6 +115,7 @@ impl WorkerConfig {
             shutdown_grace: Duration::from_secs(env_parse("BCP_SHUTDOWN_GRACE_SECS", 60)?),
             idle_exit: Duration::from_secs(env_parse("BCP_IDLE_EXIT_SECS", 30)?),
             max_log_lines: env_parse("BCP_MAX_LOG_LINES", 5000)?,
+            smtp: SmtpConfig::from_env()?,
         })
     }
 }

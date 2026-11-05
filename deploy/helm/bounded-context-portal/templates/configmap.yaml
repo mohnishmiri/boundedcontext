@@ -1,5 +1,6 @@
 {{- define "bcp.sharedConfig" -}}
 BCP_PUBLIC_URL: {{ required "config.publicUrl is required" .Values.config.publicUrl | quote }}
+BCP_DATABASE_MAX_CONNECTIONS: {{ .Values.config.databaseMaxConnections | quote }}
 BCP_GITHUB_API_URL: {{ .Values.config.github.apiUrl | quote }}
 BCP_GITHUB_WEB_URL: {{ .Values.config.github.webUrl | quote }}
 {{- with .Values.config.github.oauthUrl }}
@@ -8,8 +9,11 @@ BCP_GITHUB_OAUTH_URL: {{ . | quote }}
 BCP_GITHUB_APP_ID: {{ .Values.config.github.appId | quote }}
 BCP_GITHUB_CLIENT_ID: {{ .Values.config.github.clientId | quote }}
 BCP_AGENT_BUNDLE_DIR: {{ .Values.config.agentBundleDir | quote }}
+BCP_GENERATORS_DIR: {{ .Values.config.generatorsDir | quote }}
 BCP_MODELS_FILE: {{ .Values.config.modelsFile | quote }}
 BCP_GENERATORS_FILE: {{ .Values.config.generatorsFile | quote }}
+# API: may view every job and publish on behalf of requesters. Worker: copied on completion emails.
+BCP_ADMIN_LOGINS: {{ join "," .Values.config.adminLogins | quote }}
 {{- with .Values.config.copilotApiUrl }}
 BCP_COPILOT_API_URL: {{ . | quote }}
 {{- end }}
@@ -20,6 +24,20 @@ BCP_LOG_FORMAT: {{ .Values.config.logFormat | quote }}
 RUST_LOG: {{ .Values.config.rustLog | quote }}
 {{- with .Values.config.otel.endpoint }}
 OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+{{- end }}
+{{- with .Values.config.proxy }}
+{{- if .http }}
+HTTP_PROXY: {{ .http | quote }}
+http_proxy: {{ .http | quote }}
+{{- end }}
+{{- if .https }}
+HTTPS_PROXY: {{ .https | quote }}
+https_proxy: {{ .https | quote }}
+{{- end }}
+{{- if and (or .http .https) .noProxy }}
+NO_PROXY: {{ .noProxy | quote }}
+no_proxy: {{ .noProxy | quote }}
+{{- end }}
 {{- end }}
 {{- range $k, $v := .Values.config.extraEnv }}
 {{ $k }}: {{ $v | quote }}
@@ -35,10 +53,17 @@ metadata:
 data:
   {{- include "bcp.sharedConfig" . | nindent 2 }}
   BCP_GITHUB_APP_SLUG: {{ .Values.config.github.appSlug | quote }}
+  # Only whether the worker runs every job with one shared token; the token itself is mounted in the worker.
+  BCP_COPILOT_SHARED_TOKEN: {{ .Values.secrets.copilotSharedToken | quote }}
   BCP_API_LISTEN: "0.0.0.0:8080"
   BCP_API_METRICS_LISTEN: "0.0.0.0:9090"
   OTEL_SERVICE_NAME: "bcp-api"
-  {{- range $k, $v := .Values.api.env }}
+  {{- $env := deepCopy .Values.api.env }}
+  {{- if eq .Values.secrets.mode "akv2k8s" }}
+  {{- /* No pre-install migration hook in this mode; sqlx serialises concurrent runs with an advisory lock. */}}
+  {{- $_ := set $env "BCP_RUN_MIGRATIONS" "true" }}
+  {{- end }}
+  {{- range $k, $v := $env }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}
 {{- end }}
@@ -59,6 +84,17 @@ data:
   HOME: "/home/worker"
   COPILOT_AUTO_UPDATE: "false"
   OTEL_SERVICE_NAME: "bcp-worker"
+  {{- with .Values.config.smtp }}
+  {{- if .host }}
+  SMTP_HOST: {{ .host | quote }}
+  SMTP_PORT: {{ .port | quote }}
+  SMTP_USER: {{ .user | quote }}
+  SMTP_FROM_ADDRESS: {{ required "config.smtp.fromAddress is required when config.smtp.host is set" .fromAddress | quote }}
+  SMTP_FROM_NAME: {{ .fromName | quote }}
+  SMTP_USE_TLS: {{ .useTls | quote }}
+  BCP_NOTIFY_EMAIL_DOMAIN: {{ .fallbackDomain | quote }}
+  {{- end }}
+  {{- end }}
   {{- range $k, $v := .Values.worker.env }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}

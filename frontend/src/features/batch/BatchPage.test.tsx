@@ -51,6 +51,28 @@ describe('Batch page', () => {
     expect(urls[0].searchParams.get('per_page')).toBe('100');
   });
 
+  it('searches and pages the jobs of a large batch', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => `7f000000-2222-4c4c-9d9d-0000000000${String(i).padStart(2, '0')}`);
+    serveBatch(() =>
+      ids.map((id, i) => summary(id, { repo: i === 11 ? 'billing' : `shop${i}`, status: 'succeeded', stage: 'completed' })),
+    );
+    const { user } = renderApp(`/batches/${f.BATCH_ID}`);
+
+    const table = await screen.findByRole('table');
+    expect(within(table).getAllByRole('row').slice(1)).toHaveLength(10);
+    const pages = screen.getByRole('navigation', { name: 'Batch job pages' });
+    expect(within(pages).getByText('Showing 1–10 of 12')).toBeInTheDocument();
+    await user.click(within(pages).getByRole('button', { name: 'Next' }));
+    expect(within(screen.getByRole('table')).getAllByRole('row').slice(1)).toHaveLength(2);
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search jobs in this batch' }), 'BILL');
+    const rows = within(screen.getByRole('table')).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]).getByRole('link', { name: /acme\/billing/ })).toBeInTheDocument();
+    // Progress still counts the whole batch.
+    expect(screen.getByText('12 of 12 jobs finished.')).toBeInTheDocument();
+  });
+
   it('polls until every job is terminal', async () => {
     let calls = 0;
     const urls = serveBatch(() => {

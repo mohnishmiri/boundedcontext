@@ -48,10 +48,32 @@ the `X-Request-Id` header and in every error body) — ask users for it when the
 
 ### Deploy / rollback
 
+| Environment | URL | Values |
+| --- | --- | --- |
+| Perf | https://ragaflow-boundedcontext.test.att.com | `values-perf.yaml` |
+| Prod | https://ragaflow-boundedcontext.web.att.com | `values-prod.yaml` |
+
+Release flow: build and push once, deploy the tag to Perf, verify, then deploy the **same tag** to Prod. Full
+steps: [docker-images.md](docker-images.md) and [helm-deployment.md](helm-deployment.md).
+
 ```bash
-helm upgrade --install bcp deploy/helm/bounded-context-portal -n bcp -f values-prod.yaml --set ...image.tag=<v> --wait
-helm -n bcp history bcp
-helm -n bcp rollback bcp <REVISION> --wait
+docker login artifact.it.att.com                 # push side: no port
+scripts/push-images.sh <v>                       # bcp-api, bcp-worker, bcp-frontend -> artifact.it.att.com/<path>
+
+# Once per namespace: JFrog pull secret (global.imagePullSecrets); pull side uses port 22609
+kubectl -n bounded-context create secret docker-registry regcred --docker-server=artifact.it.att.com:22609 \
+  --docker-username=<user> --docker-password=<identity token>
+
+CHART=deploy/helm/bounded-context-portal
+helm upgrade --install bcp $CHART -n bounded-context -f $CHART/values-perf.yaml \
+  --set api.image.tag=<v> --set worker.image.tag=<v> --set frontend.image.tag=<v> \
+  --set secrets.keyVault.name=<kv> --set secrets.keyVault.tenantId=<tenant> \
+  --set serviceAccounts.api.clientId=<api-mi> --set serviceAccounts.worker.clientId=<worker-mi> \
+  --set ingress.tls.keyVaultCertUri=<cert-uri> --wait      # or --set ingress.tls.secretName=<tls-secret>
+# Prod: same command with values-prod.yaml, the prod identifiers and --set 'networkPolicy.postgres.cidrs={<ip>/32}'
+
+helm -n bounded-context history bcp
+helm -n bounded-context rollback bcp <REVISION> --wait
 ```
 
 Migrations are forward-only and additive; rolling back the application does not roll back the schema. Write new
@@ -60,8 +82,9 @@ migrations so the previous release keeps working (expand → migrate → contrac
 ### Rotate secrets
 
 1. Add a new version of the secret in Key Vault.
-2. Wait for the CSI rotation poll (`--rotation-poll-interval`, 5 min in the setup guide).
-3. `kubectl -n bcp rollout restart deploy/bcp-api deploy/bcp-worker` (once mode: new Jobs pick it up automatically).
+2. Wait until the Kubernetes Secret is updated — akv2k8s: `kubectl -n bounded-context get azurekeyvaultsecrets`
+   shows the new version (controller sync interval); CSI mode: the rotation poll (`--rotation-poll-interval`).
+3. `kubectl -n bounded-context rollout restart deploy/bcp-api` (worker: once mode, new Jobs pick it up automatically).
 
 Notes: rotating the **GitHub App private key** — create the new key in GitHub first, roll out, then delete the old
 key. Rotating the **client secret** — same order. Rotating **token-encryption-key** makes stored GitHub tokens
@@ -112,7 +135,7 @@ backups (point-in-time restore).
 ### Stuck jobs
 
 - A job stays `queued`: check `bcp_tasks_pending`, worker readiness (`kubectl get pods`), KEDA (`kubectl get
-  scaledjob,scaledobject -n bcp`, `kubectl describe` for trigger errors — usually the database secret for KEDA).
+  scaledjob,scaledobject -n bounded-context`, `kubectl describe` for trigger errors — usually the database secret for KEDA).
 - A job stays `running` after a worker crash: the reaper returns it to the queue once the lease expires
   (`BCP_TASK_LEASE_SECS`, default 60 s), or fails it when attempts are exhausted.
 

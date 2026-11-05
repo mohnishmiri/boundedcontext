@@ -75,7 +75,14 @@ export type Step = {
 
 export type JobError = { code: ErrorCode; message: string; retryable: boolean };
 
-export type User = { id: string; login: string; name: string | null; avatar_url: string | null };
+export type User = {
+  id: string;
+  login: string;
+  name: string | null;
+  avatar_url: string | null;
+  /** May view every user's jobs (read-only). */
+  is_admin?: boolean;
+};
 
 export type JobSummary = {
   id: string;
@@ -89,6 +96,7 @@ export type JobSummary = {
   publish_status: PublishStatus;
   pr_url: string | null;
   created_at: string;
+  started_at?: string | null;
   finished_at: string | null;
   requested_by: string;
   batch_id: string | null;
@@ -108,6 +116,8 @@ export type JobPublish = {
   stage: PublishStage | null;
   steps: Step[];
   title: string | null;
+  /** GitHub logins asked to review the pull request(s). */
+  reviewers?: string[];
   central_available: boolean;
   central_requested: boolean;
   central_repo: string | null;
@@ -202,6 +212,8 @@ export type Job = JobSummary & {
   output: JobOutput | null;
   usage: JobUsage | null;
   publish: JobPublish;
+  /** `false` when an administrator views another user's job: they may only publish it on the requester's behalf. */
+  viewer_is_owner?: boolean;
 };
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -209,6 +221,12 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type LogEntry = { seq: number; ts: string; level: LogLevel; stage: string; message: string };
 
 export type Page<T> = { items: T[]; page: number; per_page: number; has_more: boolean; total?: number };
+
+export type JobScope = 'mine' | 'all';
+
+export type JobStatusCounts = Record<JobStatus | 'all', number>;
+
+export type JobListPage = Page<JobSummary> & { counts?: JobStatusCounts; scope?: JobScope };
 
 export type Organization = {
   installation_id: number;

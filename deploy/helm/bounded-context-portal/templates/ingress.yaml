@@ -1,6 +1,15 @@
 {{- if .Values.ingress.enabled }}
 {{- $i := .Values.ingress }}
 {{- $name := include "bcp.fullname" . }}
+{{- $public := urlParse .Values.config.publicUrl }}
+{{- if ne $public.host $i.host }}
+{{- fail (printf "config.publicUrl host %q must equal ingress.host %q (the API rejects writes from other origins)" $public.host $i.host) }}
+{{- end }}
+{{- if $i.tls.enabled }}
+{{- $sources := 0 }}
+{{- range (list $i.tls.keyVaultCertUri $i.tls.secretName $i.tls.akv2k8sCertName) }}{{ if . }}{{ $sources = add1 $sources }}{{ end }}{{ end }}
+{{- if gt $sources 1 }}{{ fail "set only one of ingress.tls.akv2k8sCertName, ingress.tls.keyVaultCertUri, ingress.tls.secretName" }}{{ end }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -30,7 +39,7 @@ spec:
     - hosts:
         - {{ $i.host | quote }}
       # The app routing add-on syncs the Key Vault certificate into secret keyvault-<ingress name>.
-      secretName: {{ if $i.tls.keyVaultCertUri }}{{ printf "keyvault-%s" $name }}{{ else }}{{ required "ingress.tls.secretName or ingress.tls.keyVaultCertUri is required when TLS is enabled" $i.tls.secretName }}{{ end }}
+      secretName: {{ if $i.tls.keyVaultCertUri }}{{ printf "keyvault-%s" $name }}{{ else if and (eq .Values.secrets.mode "akv2k8s") $i.tls.akv2k8sCertName }}{{ printf "%s-tls" $name }}{{ else }}{{ required "ingress.tls.secretName, ingress.tls.keyVaultCertUri or ingress.tls.akv2k8sCertName is required when TLS is enabled" $i.tls.secretName }}{{ end }}
   {{- end }}
   rules:
     - host: {{ $i.host | quote }}
